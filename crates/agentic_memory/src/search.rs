@@ -1,5 +1,13 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SearchConfig {
+    pub cpuct: f64,
+    pub puct_weight: f64,
+    pub cost_penalty: f64,
+    pub latency_penalty: f64,
+    pub risk_penalty: f64,
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EdgeStats {
     pub action_id: String,

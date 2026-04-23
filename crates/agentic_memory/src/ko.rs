@@ -14,3 +14,12 @@ pub struct KoDetector {
     pub window: usize,
     pub recent: Vec<KoObservation>,
 }
+impl Default for KoDetector {
+    fn default() -> Self {
+        Self {
+            max_repetitions: 2,
+            window: 32,
+            recent: Vec::new(),
+        }
+    }
+}

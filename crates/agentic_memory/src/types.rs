@@ -3,6 +3,16 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 pub type TimestampMillis = u128;
+/// Deterministic FNV-1a hash used for IDs and exact keys. This is not intended
+/// as a cryptographic hash; swap it for BLAKE3/SHA-256 in a production store.
+pub fn stable_hash_text(input: &str) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in input.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Scope {
     pub user_id: Option<String>,
@@ -279,6 +289,40 @@ pub struct ProceduralSkill {
     pub verification_gate: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolAffordanceMemory {
+    pub header: MemoryHeader,
+    pub tool_name: String,
+    pub works_well_for: Vec<String>,
+    pub failure_modes: Vec<String>,
+    pub cost: f64,
+    pub latency: f64,
+    pub risk: f64,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PolicyValueAction {
+    pub action: AgentAction,
+    pub prior: f64,
+    pub expected_success: f64,
+    pub cost: f64,
+    pub latency: f64,
+    pub risk: f64,
+    pub reversibility: f64,
+    pub information_gain: f64,
+    pub reason: String,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PolicyValueMemory {
+    pub header: MemoryHeader,
+    pub state_pattern: String,
+    pub actions: Vec<PolicyValueAction>,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OwnershipMemory {
+    pub header: MemoryHeader,
+    pub state_pattern: String,
+    pub ownership: OwnershipMap,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExactReplay {
     pub header: MemoryHeader,
     pub exact_key: String,
@@ -333,4 +377,15 @@ pub struct PromotionRequest {
     pub target_kind: AgentMemoryKind,
     pub confidence: f64,
     pub applies_when: Vec<String>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ValueWeights {
+    pub success: f64,
+    pub prior: f64,
+    pub information_gain: f64,
+    pub cost: f64,
+    pub latency: f64,
+    pub risk: f64,
+    pub irreversibility: f64,
+    pub ownership_gain: f64,
 }
