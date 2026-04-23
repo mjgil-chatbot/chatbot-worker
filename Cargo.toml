@@ -1,0 +1,84 @@
+[package]
+name = "chatbot-worker"
+version = "0.1.0"
+edition = "2021"
+default-run = "chatbot-worker"
+license = "0BSD"
+description = "Shared worker/runtime crate for the chatbot desktop app and autonomous run driver."
+repository = "https://github.com/mjgil/chatbot-worker"
+
+[lib]
+name = "chatbot_lib"
+path = "src/lib.rs"
+
+[[bin]]
+name = "chatbot-worker"
+path = "src/bin/chatbot_worker.rs"
+
+[dependencies]
+ai-providers = { path = "../ai-providers" }
+tmc = { package = "the-markdown-commons", path = "../the-markdown-commons", features = ["egui"] }
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+anyhow = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.0", features = ["v4", "serde"] }
+dirs = "6.0"
+pulldown-cmark = "0.13"
+rust-debug = { git = "https://github.com/mjgil-rust/rust-debug", rev = "9038be5", features = ["tracing-integration"] }
+memmap2 = "0.9"
+libc = "0.2"
+zerocopy = { version = "0.8", features = ["derive"] }
+fs2 = "0.4"
+rusqlite = { version = "0.39", features = ["bundled"] }
+schemars = "1.0"
+toml = "1.0"
+once_cell = "1.19"
+bincode = "1.3"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+agent-adapter-core = { path = "../chatbot-adapter/crates/agent-adapter-core" }
+agent-adapter-providers = { path = "../chatbot-adapter/crates/agent-adapter-providers" }
+agent-adapter-router = { path = "../chatbot-adapter/crates/agent-adapter-router" }
+agent-adapter-transports = { path = "../chatbot-adapter/crates/agent-adapter-transports" }
+agent-adapter-config = { path = "../chatbot-adapter/crates/agent-adapter-config" }
+futures-util = "0.3"
+agentic_memory = { path = "crates/agentic_memory" }
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+default = ["adapter-worker"]
+adapter-worker = []
+
+[profile.release]
+opt-level = 1
+lto = false
+codegen-units = 16
+incremental = true
+
+[profile.release.package."*"]
+opt-level = 3
+
+[profile.ship]
+inherits = "release"
+opt-level = 3
+lto = true
+codegen-units = 1
+incremental = false
+
+[profile.coverage]
+inherits = "dev"
+opt-level = 0
+debug = 1
+incremental = false
+
+
+[profile.test]
+opt-level = 3  # Enables maximum optimization (0 is default for debug, 3 is default for release)
+debug = false  # Removes debug info to speed up compilation and reduce binary size
+
+[profile.dev]
+opt-level = 3  # Enables maximum optimization (0 is default for debug, 3 is default for release)
+debug = false  # Removes debug info to speed up compilation and reduce binary size

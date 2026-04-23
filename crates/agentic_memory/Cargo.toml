@@ -1,0 +1,13 @@
+[package]
+name = "agentic_memory"
+version = "0.1.0"
+edition = "2021"
+description = "Agent-native hybrid memory: exact replay, verified runbooks, policy/value priors, ownership maps, ko loop prevention, and versioned consolidation."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+# No dev dependencies required; tests use std::env::temp_dir.
