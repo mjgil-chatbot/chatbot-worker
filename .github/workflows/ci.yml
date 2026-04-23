@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bootstrap sibling checkouts
+        run: |
+          scripts/bootstrap-ci-siblings.sh
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang \
+            libasound2-dev \
+            libgl1-mesa-dev \
+            libssl-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxinerama-dev \
+            libxkbcommon-dev \
+            libxrandr-dev \
+            mold \
+            pkg-config
+
+      - name: Python tests
+        run: |
+          python3 -m unittest discover -s tests
+
+      - name: Cargo tests
+        run: |
+          cargo test --locked
+
+      - name: Cargo build
+        run: |
+          cargo build --locked
+
+      - name: Sibling boundary check
+        run: |
+          bash scripts/verify-sibling-builds.sh --check --release --repo chatbot-worker --repo __DESKTOP_REPO__

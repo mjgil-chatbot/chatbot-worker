@@ -1,0 +1,53 @@
+version = 1
+repo_id = "chatbot-worker"
+repo_root_names = ["chatbot-worker"]
+
+[[contract]]
+id = "engineering_docs"
+description = "Worker documentation and gate wiring changes must keep the local enforcement path coherent."
+trigger_globs = [
+  "docs/architecture/overview.md",
+  "contracts/engineering-gate.toml",
+  ".github/workflows/engineering-gate.yml",
+  ".githooks/pre-commit",
+  "scripts/verify-engineering-gate.sh",
+  "scripts/verify_engineering_gate.py",
+  "tests/test_engineering_gate.py",
+]
+commands = [
+  "python3 -m unittest tests.test_engineering_gate",
+]
+
+[[contract]]
+id = "worker_spool_contract"
+description = "Worker spool schema changes must update the architecture contract and pass focused release tests."
+trigger_globs = [
+  "src/worker.rs",
+  "src/worker/tests.rs",
+  "src/adapter_worker_spool_tests.rs",
+]
+required_any_staged = [
+  "docs/architecture/overview.md",
+]
+commands = [
+  "python3 -m unittest tests.test_engineering_gate",
+  "cargo test --release schema_version",
+  "cargo test --release write_json_atomic_round_trips_worker_job_snapshot",
+]
+
+[[contract]]
+id = "sibling_repo_boundary"
+description = "Worker boundary changes must keep sibling cargo surfaces checkable from the owning repo."
+trigger_globs = [
+  "src/chatbot_worker.rs",
+  "src/adapter_worker_resume_tests.rs",
+  "src/adapter_worker_spool_tests.rs",
+  "scripts/verify-sibling-builds.sh",
+]
+required_any_staged = [
+  "docs/architecture/overview.md",
+]
+commands = [
+  "python3 -m unittest tests.test_engineering_gate",
+  "bash scripts/verify-sibling-builds.sh --check --release --repo chatbot-worker --repo __DESKTOP_REPO__",
+]
