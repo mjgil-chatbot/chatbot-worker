@@ -1,3 +1,4 @@
+use crate::error::Result;
 use crate::search::SearchTree;
 use crate::types::*;
 use serde::{Deserialize, Serialize};
@@ -39,6 +40,30 @@ pub struct MemoryCommit {
     pub deltas: Vec<MemoryDelta>,
     pub checksum: String,
 }
+impl MemoryCommit {
+    pub fn new(
+        parent: Option<String>,
+        author: impl Into<String>,
+        message: impl Into<String>,
+        deltas: Vec<MemoryDelta>,
+    ) -> Self {
+        let timestamp_ms = now_millis();
+        let author = author.into();
+        let message = message.into();
+        let material =
+            serde_json::to_string(&(parent.clone(), timestamp_ms, &author, &message, &deltas))
+                .unwrap_or_else(|_| format!("{timestamp_ms}:{author}:{message}"));
+        let checksum = stable_hash_text(&material);
+        Self {
+            id: format!("commit_{checksum}"),
+            parent,
+            timestamp_ms,
+            author,
+            message,
+            deltas,
+            checksum,
+        }
+    }}
 pub trait AgentMemoryStore {
     fn verified_runbook_lookup(&self, state: &AgentState) -> Option<VerifiedRunbook>;
     fn exact_lookup(&self, state: &AgentState) -> Option<ExactReplay>;
@@ -76,3 +101,34 @@ pub struct InMemoryAgentStore {
     pub search_trees: HashMap<String, SearchTree>,
     pub commits: Vec<MemoryCommit>,
 }
+impl InMemoryAgentStore {
+    pub fn new() -> Self {
+        Self::default()
+    }}
+impl InMemoryAgentStore {
+    pub fn save_json<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+        let json = serde_json::to_string_pretty(self)?;
+        fs::write(path, json)?;
+        Ok(())
+    }}
+impl InMemoryAgentStore {
+    pub fn load_json<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let json = fs::read_to_string(path)?;
+        Ok(serde_json::from_str(&json)?)
+    }}
+impl InMemoryAgentStore {
+    pub fn commit(
+        &mut self,
+        author: impl Into<String>,
+        message: impl Into<String>,
+        deltas: Vec<MemoryDelta>,
+    ) -> MemoryCommit {
+        let parent = self.commits.last().map(|commit| commit.id.clone());
+        let commit = MemoryCommit::new(parent, author, message, deltas);
+        self.commits.push(commit.clone());
+        commit
+    }}
+impl InMemoryAgentStore {
+    pub fn upsert_exact(&mut self, exact: ExactReplay) {
+        self.exact_replay.insert(exact.exact_key.clone(), exact);
+    }}

@@ -3,6 +3,23 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 pub type TimestampMillis = u128;
+pub fn now_millis() -> TimestampMillis {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default()
+}
+pub fn clamp01(value: f64) -> f64 {
+    if value.is_nan() {
+        0.0
+    } else if value < 0.0 {
+        0.0
+    } else if value > 1.0 {
+        1.0
+    } else {
+        value
+    }
+}
 /// Deterministic FNV-1a hash used for IDs and exact keys. This is not intended
 /// as a cryptographic hash; swap it for BLAKE3/SHA-256 in a production store.
 pub fn stable_hash_text(input: &str) -> String {
@@ -13,6 +30,17 @@ pub fn stable_hash_text(input: &str) -> String {
     }
     format!("{hash:016x}")
 }
+fn slug(input: &str) -> String {
+    let mut out = String::new();
+    for ch in input.chars().take(36) {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else if !out.ends_with('_') {
+            out.push('_');
+        }
+    }
+    out.trim_matches('_').to_string()
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct Scope {
     pub user_id: Option<String>,
@@ -21,6 +49,56 @@ pub struct Scope {
     pub agent_id: Option<String>,
     pub domain: Option<String>,
 }
+impl Scope {
+    pub fn global() -> Self {
+        Self::default()
+    }}
+impl Scope {
+    pub fn user(user_id: impl Into<String>) -> Self {
+        Self {
+            user_id: Some(user_id.into()),
+            ..Self::default()
+        }
+    }}
+impl Scope {
+    pub fn project(project_id: impl Into<String>) -> Self {
+        Self {
+            project_id: Some(project_id.into()),
+            ..Self::default()
+        }
+    }}
+impl Scope {
+    pub fn domain(domain: impl Into<String>) -> Self {
+        Self {
+            domain: Some(domain.into()),
+            ..Self::default()
+        }
+    }}
+impl Scope {
+    /// A memory with a missing field is treated as broadly applicable. If both
+    /// sides provide a field, they must agree.
+    pub fn matches(&self, other: &Scope) -> bool {
+        fn field_matches(a: &Option<String>, b: &Option<String>) -> bool {
+            a.is_none() || b.is_none() || a == b
+        }
+
+        field_matches(&self.user_id, &other.user_id)
+            && field_matches(&self.org_id, &other.org_id)
+            && field_matches(&self.project_id, &other.project_id)
+            && field_matches(&self.agent_id, &other.agent_id)
+            && field_matches(&self.domain, &other.domain)
+    }}
+impl Scope {
+    pub fn text(&self) -> String {
+        [
+            self.user_id.as_deref().unwrap_or_default(),
+            self.org_id.as_deref().unwrap_or_default(),
+            self.project_id.as_deref().unwrap_or_default(),
+            self.agent_id.as_deref().unwrap_or_default(),
+            self.domain.as_deref().unwrap_or_default(),
+        ]
+        .join(" ")
+    }}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EvidenceSource {
     UserMessage,
@@ -41,6 +119,22 @@ pub struct Evidence {
     pub timestamp_ms: TimestampMillis,
     pub uri: Option<String>,
 }
+impl Evidence {
+    pub fn new(source: EvidenceSource, id: impl Into<String>, summary: impl Into<String>) -> Self {
+        Self {
+            source,
+            id: id.into(),
+            summary: summary.into(),
+            confidence: 1.0,
+            timestamp_ms: now_millis(),
+            uri: None,
+        }
+    }}
+impl Evidence {
+    pub fn with_confidence(mut self, confidence: f64) -> Self {
+        self.confidence = clamp01(confidence);
+        self
+    }}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct Invalidation {
     pub triggers: Vec<String>,
@@ -48,6 +142,31 @@ pub struct Invalidation {
     pub expires_at_ms: Option<TimestampMillis>,
     pub notes: Option<String>,
 }
+impl Invalidation {
+    pub fn valid_for_changed_artifacts(&self, changed_artifacts: &[String]) -> bool {
+        if self.changed_artifacts.is_empty() || changed_artifacts.is_empty() {
+            return true;
+        }
+        let changed = changed_artifacts
+            .iter()
+            .map(|item| item.to_lowercase())
+            .collect::<Vec<_>>();
+        !self
+            .changed_artifacts
+            .iter()
+            .map(|item| item.to_lowercase())
+            .any(|artifact| {
+                changed
+                    .iter()
+                    .any(|changed| changed.contains(&artifact) || artifact.contains(changed))
+            })
+    }}
+impl Invalidation {
+    pub fn is_not_expired(&self, now: TimestampMillis) -> bool {
+        self.expires_at_ms
+            .map(|expires| expires > now)
+            .unwrap_or(true)
+    }}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentMemoryKind {
     SemanticFact,
@@ -78,6 +197,62 @@ pub struct MemoryHeader {
     pub use_count: u64,
     pub failure_count: u64,
 }
+impl MemoryHeader {
+    pub fn new(kind: AgentMemoryKind, scope: Scope, summary: impl Into<String>) -> Self {
+        let summary = summary.into();
+        let timestamp = now_millis();
+        let id = format!(
+            "mem_{}_{}",
+            stable_hash_text(&format!("{kind:?}:{summary}:{}", scope.text())),
+            slug(&summary)
+        );
+        Self {
+            id,
+            kind,
+            scope,
+            summary,
+            tags: Vec::new(),
+            created_at_ms: timestamp,
+            updated_at_ms: timestamp,
+            confidence: 0.75,
+            evidence: Vec::new(),
+            invalidation: Invalidation::default(),
+            use_count: 0,
+            failure_count: 0,
+        }
+    }}
+impl MemoryHeader {
+    pub fn with_confidence(mut self, confidence: f64) -> Self {
+        self.confidence = clamp01(confidence);
+        self
+    }}
+impl MemoryHeader {
+    pub fn with_tags(mut self, tags: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.tags = tags.into_iter().map(Into::into).collect();
+        self
+    }}
+impl MemoryHeader {
+    pub fn with_evidence(mut self, evidence: Evidence) -> Self {
+        self.evidence.push(evidence);
+        self
+    }}
+impl MemoryHeader {
+    pub fn touch(&mut self, success: bool) {
+        self.updated_at_ms = now_millis();
+        self.use_count += 1;
+        if !success {
+            self.failure_count += 1;
+            self.confidence = clamp01(self.confidence * 0.85);
+        }
+    }}
+impl MemoryHeader {
+    pub fn is_valid_for(&self, scope: &Scope, changed_artifacts: &[String]) -> bool {
+        self.scope.matches(scope)
+            && self.invalidation.is_not_expired(now_millis())
+            && self
+                .invalidation
+                .valid_for_changed_artifacts(changed_artifacts)
+    }}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MessageRole {
     System,
@@ -92,6 +267,14 @@ pub struct AgentMessage {
     pub content: String,
     pub timestamp_ms: TimestampMillis,
 }
+impl AgentMessage {
+    pub fn new(role: MessageRole, content: impl Into<String>) -> Self {
+        Self {
+            role,
+            content: content.into(),
+            timestamp_ms: now_millis(),
+        }
+    }}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ToolSafetyClass {
     Safe,
@@ -101,6 +284,27 @@ pub enum ToolSafetyClass {
     Privileged,
     Dangerous,
 }
+impl ToolSafetyClass {
+    pub fn default_risk(self) -> f64 {
+        match self {
+            ToolSafetyClass::Safe => 0.02,
+            ToolSafetyClass::ReadOnly => 0.05,
+            ToolSafetyClass::ExternalSideEffect => 0.35,
+            ToolSafetyClass::Write => 0.45,
+            ToolSafetyClass::Privileged => 0.65,
+            ToolSafetyClass::Dangerous => 0.95,
+        }
+    }}
+impl ToolSafetyClass {
+    pub fn is_side_effectful(self) -> bool {
+        matches!(
+            self,
+            ToolSafetyClass::ExternalSideEffect
+                | ToolSafetyClass::Write
+                | ToolSafetyClass::Privileged
+                | ToolSafetyClass::Dangerous
+        )
+    }}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolSpec {
     pub name: String,
@@ -113,6 +317,51 @@ pub struct ToolSpec {
     pub risk: f64,
     pub safety_class: ToolSafetyClass,
 }
+impl ToolSpec {
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        safety_class: ToolSafetyClass,
+    ) -> Self {
+        let safety_class = safety_class;
+        Self {
+            name: name.into(),
+            description: description.into(),
+            input_schema: Value::Object(Default::default()),
+            affordances: Vec::new(),
+            constraints: Vec::new(),
+            cost: 0.15,
+            latency: 0.15,
+            risk: safety_class.default_risk(),
+            safety_class,
+        }
+    }}
+impl ToolSpec {
+    pub fn read_only(name: impl Into<String>, description: impl Into<String>) -> Self {
+        Self::new(name, description, ToolSafetyClass::ReadOnly)
+    }}
+impl ToolSpec {
+    pub fn write(name: impl Into<String>, description: impl Into<String>) -> Self {
+        Self::new(name, description, ToolSafetyClass::Write)
+    }}
+impl ToolSpec {
+    pub fn with_affordances(
+        mut self,
+        affordances: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.affordances = affordances.into_iter().map(Into::into).collect();
+        self
+    }}
+impl ToolSpec {
+    pub fn with_cost(mut self, cost: f64) -> Self {
+        self.cost = clamp01(cost);
+        self
+    }}
+impl ToolSpec {
+    pub fn with_risk(mut self, risk: f64) -> Self {
+        self.risk = clamp01(risk);
+        self
+    }}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentObservation {
     pub id: String,
@@ -123,6 +372,26 @@ pub struct AgentObservation {
     pub tool_name: Option<String>,
     pub timestamp_ms: TimestampMillis,
 }
+impl AgentObservation {
+    pub fn new(source: EvidenceSource, content: impl Into<String>) -> Self {
+        let content = content.into();
+        Self {
+            id: format!("obs_{}", stable_hash_text(&content)),
+            source,
+            content,
+            artifact_refs: Vec::new(),
+            error_signature: None,
+            tool_name: None,
+            timestamp_ms: now_millis(),
+        }
+    }}
+impl AgentObservation {
+    pub fn tool(tool_name: impl Into<String>, content: impl Into<String>) -> Self {
+        let tool_name = tool_name.into();
+        let mut observation = Self::new(EvidenceSource::ToolObservation, content);
+        observation.tool_name = Some(tool_name);
+        observation
+    }}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RegionStatus {
     Owned,
@@ -132,6 +401,17 @@ pub enum RegionStatus {
     Stale,
     Blocked,
 }
+impl RegionStatus {
+    pub fn uncertainty(self) -> f64 {
+        match self {
+            RegionStatus::Owned => 0.05,
+            RegionStatus::Unknown => 0.90,
+            RegionStatus::Contested => 0.72,
+            RegionStatus::Risky => 0.62,
+            RegionStatus::Stale => 0.55,
+            RegionStatus::Blocked => 0.80,
+        }
+    }}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OwnershipRegion {
     pub name: String,
@@ -142,10 +422,79 @@ pub struct OwnershipRegion {
     pub evidence_ids: Vec<String>,
     pub information_gain_actions: Vec<String>,
 }
+impl OwnershipRegion {
+    pub fn new(name: impl Into<String>, status: RegionStatus, confidence: f64) -> Self {
+        Self {
+            name: name.into(),
+            status,
+            confidence: clamp01(confidence),
+            candidates: Vec::new(),
+            blocking_unknowns: Vec::new(),
+            evidence_ids: Vec::new(),
+            information_gain_actions: Vec::new(),
+        }
+    }}
+impl OwnershipRegion {
+    pub fn uncertainty(&self) -> f64 {
+        clamp01((1.0 - self.confidence) * 0.45 + self.status.uncertainty() * 0.55)
+    }}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct OwnershipMap {
     pub regions: BTreeMap<String, OwnershipRegion>,
 }
+impl OwnershipMap {
+    pub fn insert(&mut self, region: OwnershipRegion) {
+        self.regions.insert(region.name.clone(), region);
+    }}
+impl OwnershipMap {
+    pub fn max_uncertainty(&self) -> f64 {
+        self.regions
+            .values()
+            .map(OwnershipRegion::uncertainty)
+            .fold(0.0, f64::max)
+    }}
+impl OwnershipMap {
+    pub fn uncertain_regions(&self, threshold: f64) -> Vec<String> {
+        self.regions
+            .values()
+            .filter(|region| region.uncertainty() >= threshold)
+            .map(|region| region.name.clone())
+            .collect()
+    }}
+impl OwnershipMap {
+    pub fn merge_prefer_confident(&mut self, other: OwnershipMap) {
+        for (name, incoming) in other.regions {
+            match self.regions.get(&name) {
+                Some(existing) if existing.confidence >= incoming.confidence => {}
+                _ => {
+                    self.regions.insert(name, incoming);
+                }
+            }
+        }
+    }}
+impl OwnershipMap {
+    pub fn uncertainty_reduction_for(&self, action_label: &str) -> f64 {
+        let action = action_label.to_lowercase();
+        let mut gain: f64 = 0.0;
+        for region in self.regions.values() {
+            let region_matches = region.information_gain_actions.iter().any(|candidate| {
+                action.contains(&candidate.to_lowercase())
+                    || candidate.to_lowercase().contains(&action)
+            });
+            let implicit_matches = (action.contains("ask")
+                && region.status == RegionStatus::Unknown)
+                || (action.contains("verify")
+                    && matches!(region.status, RegionStatus::Contested | RegionStatus::Risky))
+                || (action.contains("read")
+                    && matches!(region.status, RegionStatus::Unknown | RegionStatus::Stale))
+                || (action.contains("inspect") && region.status != RegionStatus::Owned)
+                || (action.contains("retrieve") && region.status != RegionStatus::Owned);
+            if region_matches || implicit_matches {
+                gain = gain.max(region.uncertainty());
+            }
+        }
+        clamp01(gain)
+    }}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentAction {
@@ -181,6 +530,61 @@ pub enum AgentAction {
     Finish {
         summary: String,
     },
+}
+impl AgentAction {
+    pub fn label(&self) -> String {
+        match self {
+            AgentAction::Respond { message } => format!("respond: {}", short(message)),
+            AgentAction::AskUser { question } => format!("ask user: {}", short(question)),
+            AgentAction::UseTool {
+                tool_name,
+                expected_observation,
+                ..
+            } => match expected_observation {
+                Some(expected) => format!("use tool {tool_name}: {}", short(expected)),
+                None => format!("use tool {tool_name}"),
+            },
+            AgentAction::RetrieveMemory { query, regions } => {
+                if regions.is_empty() {
+                    format!("retrieve memory: {}", short(query))
+                } else {
+                    format!("retrieve memory [{}]: {}", regions.join(","), short(query))
+                }
+            }
+            AgentAction::Verify { claim, verifier } => {
+                format!("verify with {verifier}: {}", short(claim))
+            }
+            AgentAction::Plan { steps } => format!("plan: {} steps", steps.len()),
+            AgentAction::Reflect { focus } => format!("reflect: {}", short(focus)),
+            AgentAction::Delegate { agent, task } => {
+                format!("delegate to {agent}: {}", short(task))
+            }
+            AgentAction::Finish { summary } => format!("finish: {}", short(summary)),
+        }
+    }}
+impl AgentAction {
+    pub fn kind_label(&self) -> &'static str {
+        match self {
+            AgentAction::Respond { .. } => "respond",
+            AgentAction::AskUser { .. } => "ask_user",
+            AgentAction::UseTool { .. } => "tool_call",
+            AgentAction::RetrieveMemory { .. } => "retrieve_memory",
+            AgentAction::Verify { .. } => "verify",
+            AgentAction::Plan { .. } => "plan",
+            AgentAction::Reflect { .. } => "reflect",
+            AgentAction::Delegate { .. } => "delegate",
+            AgentAction::Finish { .. } => "finish",
+        }
+    }}
+fn short(input: &str) -> String {
+    let trimmed = input.trim();
+    if trimmed.chars().count() <= 72 {
+        trimmed.to_string()
+    } else {
+        let mut out = trimmed.chars().take(69).collect::<String>();
+        out.push_str("...");
+        out
+    }
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ActionCandidate {

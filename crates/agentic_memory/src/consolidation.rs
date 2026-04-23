@@ -1,3 +1,4 @@
+use crate::store::{InMemoryAgentStore, MemoryDelta};
 use crate::types::*;
 use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,3 +35,95 @@ impl Default for Consolidator {
         }
     }
 }
+impl Consolidator {
+    fn promote_semantic_like(
+        &self,
+        store: &mut InMemoryAgentStore,
+        episode: &EpisodicTrace,
+        request: &PromotionRequest,
+        deltas: &mut Vec<MemoryDelta>,
+    ) {
+        match request.target_kind {
+            AgentMemoryKind::UserPreference => {
+                let pref = UserPreference {
+                    header: MemoryHeader::new(
+                        AgentMemoryKind::UserPreference,
+                        episode.header.scope.clone(),
+                        request.claim_or_pattern.clone(),
+                    )
+                    .with_confidence(request.confidence)
+                    .with_evidence(Evidence::new(
+                        EvidenceSource::Episode,
+                        episode.header.id.clone(),
+                        episode.final_outcome.clone(),
+                    )),
+                    preference: request.claim_or_pattern.clone(),
+                    strength: request.confidence,
+                    not_a_constraint: true,
+                    examples: vec![episode.initial_goal.clone()],
+                };
+                deltas.push(MemoryDelta::Upsert {
+                    kind: AgentMemoryKind::UserPreference,
+                    id: pref.header.id.clone(),
+                    summary: pref.preference.clone(),
+                });
+                store.user_preferences.push(pref);
+            }
+            AgentMemoryKind::ProjectFact => {
+                let fact = ProjectFact {
+                    header: MemoryHeader::new(
+                        AgentMemoryKind::ProjectFact,
+                        episode.header.scope.clone(),
+                        request.claim_or_pattern.clone(),
+                    )
+                    .with_confidence(request.confidence)
+                    .with_evidence(Evidence::new(
+                        EvidenceSource::Episode,
+                        episode.header.id.clone(),
+                        episode.final_outcome.clone(),
+                    )),
+                    project: episode
+                        .header
+                        .scope
+                        .project_id
+                        .clone()
+                        .unwrap_or_else(|| "unknown_project".into()),
+                    fact: request.claim_or_pattern.clone(),
+                    applies_when: request.applies_when.clone(),
+                    invalidates_on: Vec::new(),
+                };
+                deltas.push(MemoryDelta::Upsert {
+                    kind: AgentMemoryKind::ProjectFact,
+                    id: fact.header.id.clone(),
+                    summary: fact.fact.clone(),
+                });
+                store.project_facts.push(fact);
+            }
+            _ => {
+                let fact = SemanticFact {
+                    header: MemoryHeader::new(
+                        AgentMemoryKind::SemanticFact,
+                        episode.header.scope.clone(),
+                        request.claim_or_pattern.clone(),
+                    )
+                    .with_confidence(request.confidence)
+                    .with_evidence(Evidence::new(
+                        EvidenceSource::Episode,
+                        episode.header.id.clone(),
+                        episode.final_outcome.clone(),
+                    )),
+                    subject: episode.initial_goal.clone(),
+                    predicate: "implies".into(),
+                    object: request.claim_or_pattern.clone(),
+                    applies_when: request.applies_when.clone(),
+                    does_not_apply_when: Vec::new(),
+                };
+                deltas.push(MemoryDelta::Upsert {
+                    kind: AgentMemoryKind::SemanticFact,
+                    id: fact.header.id.clone(),
+                    summary: fact.object.clone(),
+                });
+                store.semantic.push(fact);
+            }
+        }
+    }}
