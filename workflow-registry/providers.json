@@ -1,0 +1,257 @@
+{
+  "providers": [
+    {
+      "provider_id": "claude",
+      "model_override": "claude-opus-4-6",
+      "prompt_family": "principles",
+      "supported_categories": [
+        "survey",
+        "design",
+        "plan",
+        "deep_write",
+        "review",
+        "verify",
+        "doc_write",
+        "research"
+      ],
+      "preferred_categories": [
+        "design",
+        "deep_write",
+        "review",
+        "research"
+      ],
+      "fallback_chain": [
+        "codex",
+        "minimax",
+        "qwen"
+      ],
+      "cooldown_eligible": true,
+      "max_concurrency": 6,
+      "cost_tier": "premium",
+      "notes": "Strong default for synthesis, high-context writing, and design consensus work."
+    },
+    {
+      "provider_id": "codex",
+      "model_override": "gpt-5.4",
+      "prompt_family": "mechanics",
+      "supported_categories": [
+        "survey",
+        "design",
+        "plan",
+        "deep_write",
+        "quick_write",
+        "review",
+        "verify",
+        "doc_write"
+      ],
+      "preferred_categories": [
+        "plan",
+        "deep_write",
+        "verify"
+      ],
+      "fallback_chain": [
+        "claude",
+        "minimax",
+        "qwen"
+      ],
+      "cooldown_eligible": true,
+      "max_concurrency": 6,
+      "cost_tier": "high",
+      "notes": "Best fit for explicit implementation prompts, stepwise execution, and repo-grounded verification."
+    },
+    {
+      "provider_id": "nvidia",
+      "model_override": "nvidia/nemotron-3-super-120b-a12b",
+      "prompt_family": "mechanics",
+      "supported_categories": [
+        "survey",
+        "design",
+        "plan",
+        "deep_write",
+        "quick_write",
+        "review",
+        "verify",
+        "doc_write"
+      ],
+      "preferred_categories": [
+        "deep_write",
+        "verify",
+        "quick_write"
+      ],
+      "fallback_chain": [
+        "codex",
+        "claude",
+        "minimax",
+        "qwen"
+      ],
+      "cooldown_eligible": true,
+      "max_concurrency": 4,
+      "cost_tier": "medium",
+      "notes": "Nvidia uses the Codex-compatible path and fits implementation, verification, and document materialization work."
+    },
+    {
+      "provider_id": "gemini",
+      "model_override": "gemini-3-flash-preview",
+      "prompt_family": "principles",
+      "supported_categories": [
+        "survey",
+        "design",
+        "plan",
+        "review",
+        "verify",
+        "research",
+        "doc_write"
+      ],
+      "preferred_categories": [
+        "survey",
+        "design",
+        "review",
+        "verify",
+        "research"
+      ],
+      "fallback_chain": [
+        "claude",
+        "codex",
+        "qwen"
+      ],
+      "cooldown_eligible": true,
+      "max_concurrency": 2,
+      "cost_tier": "medium",
+      "notes": "Fast parallel analyst for research, review, and verification-heavy tasks."
+    },
+    {
+      "provider_id": "minimax",
+      "model_override": "MiniMax-M2.7",
+      "prompt_family": "mechanics",
+      "supported_categories": [
+        "survey",
+        "design",
+        "plan",
+        "quick_write",
+        "verify",
+        "doc_write"
+      ],
+      "preferred_categories": [
+        "quick_write",
+        "verify"
+      ],
+      "fallback_chain": [
+        "qwen",
+        "codex"
+      ],
+      "cooldown_eligible": true,
+      "max_concurrency": 4,
+      "cost_tier": "low",
+      "notes": "Low-cost utility path for lighter drafting, fast checks, and spillover capacity."
+    },
+    {
+      "provider_id": "qwen",
+      "model_override": "qwen/qwen3-coder:free",
+      "prompt_family": "mechanics",
+      "supported_categories": [
+        "survey",
+        "design",
+        "plan",
+        "quick_write",
+        "review",
+        "verify",
+        "research"
+      ],
+      "preferred_categories": [
+        "quick_write",
+        "review",
+        "research"
+      ],
+      "fallback_chain": [
+        "minimax",
+        "codex",
+        "claude"
+      ],
+      "cooldown_eligible": true,
+      "max_concurrency": 2,
+      "cost_tier": "low",
+      "notes": "OpenRouter-backed Qwen path for cheap coding, lightweight reviews, and fallback coverage."
+    },
+    {
+      "provider_id": "openrouter",
+      "prompt_family": "mechanics",
+      "supported_categories": [
+        "survey",
+        "design",
+        "plan",
+        "quick_write",
+        "review",
+        "verify",
+        "research"
+      ],
+      "preferred_categories": [
+        "quick_write",
+        "review"
+      ],
+      "fallback_chain": [
+        "qwen",
+        "codex",
+        "claude"
+      ],
+      "cooldown_eligible": true,
+      "max_concurrency": 2,
+      "cost_tier": "low",
+      "notes": "Generic OpenRouter path for flexible model routing."
+    },
+    {
+      "provider_id": "geminiforge",
+      "model_override": "gemini-3-flash-preview",
+      "prompt_family": "principles",
+      "supported_categories": [
+        "survey",
+        "design",
+        "plan",
+        "review",
+        "verify",
+        "research",
+        "doc_write"
+      ],
+      "preferred_categories": [
+        "survey",
+        "review",
+        "verify",
+        "research"
+      ],
+      "fallback_chain": [
+        "gemini",
+        "claude",
+        "codex"
+      ],
+      "cooldown_eligible": true,
+      "max_concurrency": 2,
+      "cost_tier": "medium",
+      "notes": "Forge-backed Gemini path using the rust-chatbot compatibility subprocess."
+    },
+    {
+      "provider_id": "minimaxforge",
+      "model_override": "MiniMax-M2.7",
+      "prompt_family": "mechanics",
+      "supported_categories": [
+        "survey",
+        "design",
+        "plan",
+        "quick_write",
+        "verify",
+        "doc_write"
+      ],
+      "preferred_categories": [
+        "quick_write",
+        "verify"
+      ],
+      "fallback_chain": [
+        "minimax",
+        "qwen",
+        "codex"
+      ],
+      "cooldown_eligible": true,
+      "max_concurrency": 4,
+      "cost_tier": "low",
+      "notes": "Forge-backed MiniMax path using the rust-chatbot compatibility subprocess."
+    }
+  ]
+}
