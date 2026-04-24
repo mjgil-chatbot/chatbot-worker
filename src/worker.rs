@@ -8,6 +8,49 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use crate::config;
+/// Root directory for all worker data.
+pub fn workers_dir() -> PathBuf {
+    config::shared_infra_dir().join("workers")
+}
+/// Validate chat_id to prevent path traversal attacks.
+/// Returns the chat_id if valid, otherwise None.
+fn validate_chat_id(chat_id: &str) -> Option<&str> {
+    // Reject empty strings
+    if chat_id.is_empty() {
+        return None;
+    }
+    // Reject path traversal characters
+    if chat_id.contains("..") || chat_id.contains('/') || chat_id.contains('\\') {
+        return None;
+    }
+    // Reject characters that could be used for path manipulation
+    if chat_id.contains('\0') || chat_id.contains(':') {
+        return None;
+    }
+    Some(chat_id)
+}
+fn safe_chat_id_component(chat_id: &str) -> Cow<'_, str> {
+    if let Some(valid) = validate_chat_id(chat_id) {
+        return Cow::Borrowed(valid);
+    }
+
+    let mut encoded = String::with_capacity(chat_id.len() * 2 + 8);
+    encoded.push_str("chat-");
+    for byte in chat_id.as_bytes() {
+        encoded.push(char::from_digit((byte >> 4) as u32, 16).unwrap());
+        encoded.push(char::from_digit((byte & 0x0f) as u32, 16).unwrap());
+    }
+    Cow::Owned(encoded)
+}
+/// Directory for a specific worker (by chat_id).
+pub fn worker_dir(chat_id: &str) -> PathBuf {
+    workers_dir().join(safe_chat_id_component(chat_id).as_ref())
+}
+/// Path to per-run transport retry diagnostics for a worker.
+pub fn transport_errors_path(chat_id: &str) -> PathBuf {
+    worker_dir(chat_id).join("transport-errors.log")
+}
 /// Atomically write text content inside the worker spool directory.
 pub fn write_text_atomic(path: &Path, content: &str) -> io::Result<()> {
     write_bytes_atomic(path, content.as_bytes())
