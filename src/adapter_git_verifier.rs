@@ -3,13 +3,16 @@ use serde::Serialize;
 use std::collections::{BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
 #[path = "adapter_git_verifier_text.rs"]
 mod text;
+
 use text::{
     commit_claim_matches_repo, extract_probable_commit_ids, intent_query_text,
     mentions_branch_creation, mentions_git_commit, mentions_git_merge, mentions_git_push,
     mentions_git_tag,
 };
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 struct GitSideEffectIntent {
     require_commit: bool,
@@ -18,6 +21,7 @@ struct GitSideEffectIntent {
     require_merge: bool,
     require_branch_create: bool,
 }
+
 impl GitSideEffectIntent {
     fn from_query(query: &str) -> Option<Self> {
         let lower = intent_query_text(query).to_ascii_lowercase();
@@ -29,16 +33,16 @@ impl GitSideEffectIntent {
             require_branch_create: mentions_branch_creation(&lower),
         };
         (!intent.is_empty()).then_some(intent)
-    }}
-impl GitSideEffectIntent {
+    }
+
     fn is_empty(self) -> bool {
         !self.require_commit
             && !self.require_push
             && !self.require_tag
             && !self.require_merge
             && !self.require_branch_create
-    }}
-impl GitSideEffectIntent {
+    }
+
     fn describe(self) -> String {
         let mut parts = Vec::new();
         if self.require_commit {
@@ -60,7 +64,9 @@ impl GitSideEffectIntent {
             return "git side effects".to_string();
         }
         parts.join(", ")
-    }}
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 struct GitRepoSnapshot {
     repo_root: PathBuf,
@@ -71,6 +77,7 @@ struct GitRepoSnapshot {
     tags: BTreeSet<String>,
     local_branches: BTreeSet<String>,
 }
+
 impl GitRepoSnapshot {
     fn capture(cwd: &Path) -> Result<Option<Self>> {
         let Some(repo_root) = git_optional_stdout(cwd, &["rev-parse", "--show-toplevel"])? else {
@@ -111,7 +118,9 @@ impl GitRepoSnapshot {
             tags,
             local_branches,
         }))
-    }}
+    }
+}
+
 fn fallback_origin_ref(repo_root: &Path, branch: &str) -> Option<String> {
     let ref_name = format!("refs/remotes/origin/{branch}");
     git_optional_stdout(repo_root, &["rev-parse", "--verify", &ref_name])
@@ -119,6 +128,7 @@ fn fallback_origin_ref(repo_root: &Path, branch: &str) -> Option<String> {
         .flatten()
         .map(|_| ref_name)
 }
+
 #[cfg(test)]
 fn git_stdout(cwd: &Path, args: &[&str]) -> Result<String> {
     let output = Command::new("git")
@@ -138,6 +148,7 @@ fn git_stdout(cwd: &Path, args: &[&str]) -> Result<String> {
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
+
 fn git_optional_stdout(cwd: &Path, args: &[&str]) -> Result<Option<String>> {
     let output = Command::new("git")
         .arg("-C")
@@ -151,6 +162,7 @@ fn git_optional_stdout(cwd: &Path, args: &[&str]) -> Result<Option<String>> {
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     Ok((!stdout.is_empty()).then_some(stdout))
 }
+
 fn git_ref_set(cwd: &Path, args: &[&str]) -> Result<BTreeSet<String>> {
     let stdout = git_optional_stdout(cwd, args)?.unwrap_or_default();
     Ok(stdout
@@ -160,9 +172,11 @@ fn git_ref_set(cwd: &Path, args: &[&str]) -> Result<BTreeSet<String>> {
         .map(ToOwned::to_owned)
         .collect())
 }
+
 fn commit_exists(repo_root: &Path, sha: &str) -> Result<bool> {
     Ok(git_optional_stdout(repo_root, &["rev-parse", "--verify", sha])?.is_some())
 }
+
 fn head_changed(before: Option<&GitRepoSnapshot>, after: &GitRepoSnapshot) -> bool {
     match (
         before.and_then(|snapshot| snapshot.head_sha.as_deref()),
@@ -173,18 +187,21 @@ fn head_changed(before: Option<&GitRepoSnapshot>, after: &GitRepoSnapshot) -> bo
         _ => false,
     }
 }
+
 fn short_sha(sha: &str) -> &str {
     let end = sha.len().min(7);
     &sha[..end]
 }
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RawJsonlCapture {
     total_bytes: usize,
     lines: VecDeque<String>,
 }
+
 impl RawJsonlCapture {
-    const MAX_CAPTURE_BYTES: usize = 256 * 1024;}
-impl RawJsonlCapture {
+    const MAX_CAPTURE_BYTES: usize = 256 * 1024;
+
     pub(crate) fn push_line(&mut self, line: impl Into<String>) {
         let line = line.into();
         self.total_bytes = self.total_bytes.saturating_add(line.len() + 1);
@@ -195,12 +212,12 @@ impl RawJsonlCapture {
             };
             self.total_bytes = self.total_bytes.saturating_sub(removed.len() + 1);
         }
-    }}
-impl RawJsonlCapture {
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.lines.is_empty()
-    }}
-impl RawJsonlCapture {
+    }
+
     pub(crate) fn as_text(&self) -> String {
         if self.lines.is_empty() {
             return String::new();
@@ -208,16 +225,21 @@ impl RawJsonlCapture {
         let mut text = self.lines.iter().cloned().collect::<Vec<_>>().join("\n");
         text.push('\n');
         text
-    }}
+    }
+}
+
 pub(crate) fn raw_adapter_events_path(spool_dir: &Path) -> PathBuf {
     spool_dir.join("adapter-events.raw.jsonl")
 }
+
 pub(crate) fn raw_provider_events_path(spool_dir: &Path) -> PathBuf {
     spool_dir.join("provider-events.raw.jsonl")
 }
+
 pub(crate) fn git_verifier_context_path(spool_dir: &Path) -> PathBuf {
     spool_dir.join("git-verifier-context.json")
 }
+
 #[derive(Debug, Serialize)]
 struct GitVerifierContextArtifact<'a> {
     request_query: &'a str,
@@ -226,6 +248,7 @@ struct GitVerifierContextArtifact<'a> {
     intent: GitSideEffectIntent,
     before: Option<&'a GitRepoSnapshot>,
 }
+
 pub(crate) fn persist_failed_verification_artifacts(
     spool_dir: &Path,
     request_query: &str,
@@ -280,12 +303,14 @@ pub(crate) fn persist_failed_verification_artifacts(
 
     Ok(())
 }
+
 #[derive(Clone, Debug)]
 pub(crate) struct GitSideEffectGuard {
     intent: GitSideEffectIntent,
     before: Option<GitRepoSnapshot>,
     cwd: PathBuf,
 }
+
 impl GitSideEffectGuard {
     pub(crate) fn prepare(query: &str, cwd: &Path) -> Result<Option<Self>> {
         let Some(intent) = GitSideEffectIntent::from_query(query) else {
@@ -296,8 +321,8 @@ impl GitSideEffectGuard {
             before: GitRepoSnapshot::capture(cwd)?,
             cwd: cwd.to_path_buf(),
         }))
-    }}
-impl GitSideEffectGuard {
+    }
+
     pub(crate) fn verify_success(&self, output: &str) -> Result<()> {
         let after = GitRepoSnapshot::capture(&self.cwd)?;
         let Some(after) = after else {
@@ -418,4 +443,9 @@ impl GitSideEffectGuard {
             after.repo_root.display(),
             problems.join("; ")
         ))
-    }}
+    }
+}
+
+#[cfg(test)]
+#[path = "adapter_git_verifier_tests.rs"]
+mod tests;
