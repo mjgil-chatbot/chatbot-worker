@@ -1,6 +1,19 @@
 use agent_adapter_core::types::LogLevel;
 use agent_adapter_core::AgentEvent;
 use serde_json::Value;
+use crate::model::ModelProvider;
+#[derive(Clone, Debug)]
+pub struct LiveSummaryContext {
+    provider: Option<ModelProvider>,
+    configured_model: Option<String>,
+}
+impl LiveSummaryContext {
+    pub fn new(provider: Option<ModelProvider>, configured_model: Option<String>) -> Self {
+        Self {
+            provider,
+            configured_model,
+        }
+    }}
 fn friendly_model_label(model: &str, fallback: &str) -> String {
     let lower = model.to_ascii_lowercase();
     if model == "unknown" {
