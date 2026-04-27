@@ -9,6 +9,23 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use crate::config;
+use crate::memory::MemoryContext;
+/// Request written by the UI before spawning a worker.
+#[derive(Debug, Clone)]
+pub struct WorkerRequest {
+    pub provider: String,
+    pub query: String,
+    pub working_dir: Option<String>,
+    pub system_prompt: Option<String>,
+    pub resume_session_id: Option<String>,
+    pub memory_context: Option<MemoryContext>,
+    pub parent_pid_override: Option<u32>,
+    pub runsc_dirs: Vec<String>,
+    pub runsc_image: Option<String>,
+    pub model_override: Option<String>,
+    pub command: String,
+    pub chat_id: String,
+}
 /// Root directory for all worker data.
 pub fn workers_dir() -> PathBuf {
     config::shared_infra_dir().join("workers")
