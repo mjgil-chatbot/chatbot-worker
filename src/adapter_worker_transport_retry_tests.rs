@@ -70,3 +70,20 @@ sys.exit(0)
     perms.set_mode(0o755);
     std::fs::set_permissions(adapter_path, perms).unwrap();
 }
+#[cfg(unix)]
+fn test_request(chat_id: &str) -> WorkerRequest {
+    WorkerRequest {
+        provider: "claude".to_string(),
+        query: "hello".to_string(),
+        working_dir: Some("/tmp".to_string()),
+        system_prompt: None,
+        resume_session_id: None,
+        memory_context: None,
+        parent_pid_override: None,
+        runsc_dirs: vec![],
+        runsc_image: None,
+        model_override: None,
+        command: "chat".to_string(),
+        chat_id: chat_id.to_string(),
+    }
+}

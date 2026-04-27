@@ -25,6 +25,7 @@ use tokio::process::Command as TokioCommand;
 use tokio::time::{sleep, Duration};
 use crate::model::ModelProvider;
 use crate::stream::StreamEvent;
+use crate::worker::WorkerRequest;
 fn raw_provider_event_error_message(payload: &serde_json::Value) -> Option<String> {
     let event_type = payload.get("type").and_then(|value| value.as_str());
     if event_type == Some("error") {
@@ -204,6 +205,11 @@ fn agent_event_to_stream_event(
 fn timestamp_now() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
+impl WorkerRequest {
+    /// Path to the worker spool directory for this chat_id.
+    fn worker_spool_dir(&self) -> PathBuf {
+        crate::worker::worker_dir(&self.chat_id)
+    }}
 #[cfg(test)]
 #[path = "adapter_worker_resume_tests.rs"]
 mod resume_tests;
