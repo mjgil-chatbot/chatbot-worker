@@ -9,6 +9,7 @@ pub mod adapter_live_summary;
 pub mod adapter_tool_call_schema;
 pub mod adapter_transport;
 pub mod adapter_worker;
+pub mod cgroup;
 pub mod config;
 pub mod model;
 pub mod stream;
