@@ -14,6 +14,7 @@ pub mod chatbot_worker;
 pub mod chatbot_worker_adapter;
 pub mod chatbot_worker_runtime;
 pub mod chatbot_worker_trace;
+pub mod companion_binary;
 pub mod config;
 pub mod memory;
 pub mod model;
