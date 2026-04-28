@@ -88,3 +88,5 @@ fn parse_worker_extension_request(
         serde_json::from_str(&request.query).context("failed to parse worker extension request")?;
     Ok(Some(parsed))
 }
+#[cfg(test)]
+mod tests;
