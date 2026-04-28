@@ -9,6 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::{mpsc, Arc};
+use crate::worker::WorkerRequest;
 use crate::worker_ext;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -76,4 +77,14 @@ fn default_background_role() -> String {
 }
 fn default_background_context_budget() -> usize {
     0
+}
+fn parse_worker_extension_request(
+    request: &WorkerRequest,
+) -> Result<Option<WorkerExtensionRequest>> {
+    if request.command.trim() != "worker-ext" {
+        return Ok(None);
+    }
+    let parsed =
+        serde_json::from_str(&request.query).context("failed to parse worker extension request")?;
+    Ok(Some(parsed))
 }
