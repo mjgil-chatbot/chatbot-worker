@@ -18,6 +18,7 @@ pub mod companion_binary;
 pub mod config;
 pub mod memory;
 pub mod model;
+pub mod provider_catalog;
 pub mod stream;
 pub mod worker;
 pub mod worker_ext;
