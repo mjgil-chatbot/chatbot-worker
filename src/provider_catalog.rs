@@ -388,3 +388,7 @@ pub fn by_id(provider: ModelProvider) -> &'static ProviderEntry {
             )
         })
 }
+/// Look up a catalog entry by its shared-memory discriminant code.
+pub fn by_shm_code(code: u32) -> Option<&'static ProviderEntry> {
+    PROVIDERS.iter().find(|e| e.shm_code == code)
+}
