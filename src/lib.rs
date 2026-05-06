@@ -52,6 +52,7 @@ pub mod hooks;
 pub mod kimi_bridge;
 pub mod memory;
 pub mod model;
+pub mod omniforge;
 pub mod provider_catalog;
 pub mod storage;
 pub mod stream;
