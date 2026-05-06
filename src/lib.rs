@@ -20,6 +20,7 @@ pub mod data;
 pub mod debug;
 pub mod delta_resolution;
 pub mod hooks;
+pub mod kimi_bridge;
 pub mod memory;
 pub mod model;
 pub mod provider_catalog;
