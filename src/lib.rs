@@ -19,6 +19,7 @@ pub mod config;
 pub mod data;
 pub mod debug;
 pub mod delta_resolution;
+pub mod hooks;
 pub mod memory;
 pub mod model;
 pub mod provider_catalog;
