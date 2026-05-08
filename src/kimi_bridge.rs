@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use crate::provider_bridge::{kimi_cli_config, ProviderRequestOverrides};
 use crate::{config, worker};
 const BRIDGE_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const BRIDGE_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
@@ -30,6 +31,51 @@ struct BridgeConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct BridgePromptRequest {
     prompt: String,
+}
+fn ensure_bridge(
+    chat_id: &str,
+    working_dir: Option<&str>,
+    resume_session_id: Option<&str>,
+    overrides: Option<&ProviderRequestOverrides>,
+) -> Result<BridgeConfig> {
+    let config = bridge_config(chat_id, working_dir, resume_session_id, overrides)?;
+    fs::create_dir_all(bridge_root_dir(chat_id))
+        .with_context(|| format!("failed to create bridge dir for chat {chat_id}"))?;
+    fs::write(config_path(chat_id), serde_json::to_vec_pretty(&config)?)
+        .with_context(|| format!("failed to write Kimi bridge config for chat {chat_id}"))?;
+
+    if bridge_is_live(&config.socket_path) {
+        return Ok(config);
+    }
+
+    cleanup_stale_bridge(&config);
+    spawn_bridge_process(chat_id)?;
+    wait_for_bridge(&config.socket_path)?;
+    Ok(config)
+}
+fn bridge_config(
+    chat_id: &str,
+    working_dir: Option<&str>,
+    resume_session_id: Option<&str>,
+    overrides: Option<&ProviderRequestOverrides>,
+) -> Result<BridgeConfig> {
+    let kimi = kimi_cli_config(overrides);
+    let root = bridge_root_dir(chat_id);
+    let socket_path = root.join("bridge.sock");
+    let pid_path = root.join("bridge.pid");
+    let session_id = resume_session_id
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("rust-chatbot-{}", uuid::Uuid::new_v4()));
+    Ok(BridgeConfig {
+        chat_id: chat_id.to_string(),
+        socket_path,
+        pid_path,
+        cli: kimi.cli,
+        model: kimi.model,
+        session_id,
+        working_dir: working_dir.map(str::to_string),
+        extra_env: kimi.extra_env,
+    })
 }
 fn bridge_root_dir(chat_id: &str) -> PathBuf {
     let safe_name = worker::worker_dir(chat_id)
