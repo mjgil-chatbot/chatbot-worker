@@ -320,3 +320,98 @@ pub fn mcp_server_names(overrides: Option<&ProviderRequestOverrides>) -> Vec<Str
         .cloned()
         .collect()
 }
+fn configured_claude_family_has_mcp_servers(
+    provider: ModelProvider,
+    overrides: Option<&ProviderRequestOverrides>,
+) -> bool {
+    let mcp_json = resolved_mcp_json_path(overrides);
+    let Some(json) = load_mcp_json_value(&mcp_json) else {
+        return false;
+    };
+
+    configured_mcp_servers(&json, provider_mcp_profile(provider))
+        .map(|servers| !filtered_mcp_servers(servers, overrides).is_empty())
+        .unwrap_or(false)
+}
+pub fn qwen_cli_config(overrides: Option<&ProviderRequestOverrides>) -> QwenCodeCliConfig {
+    let mcp_server_names = mcp_server_names(overrides);
+    let cli = resolve_cli_launch_path(&config::qwen_code_cli_path());
+    let mut extra_env = Vec::new();
+    push_cli_runtime_path_env(&mut extra_env, &cli);
+
+    QwenCodeCliConfig {
+        cli,
+        model: config::interactive_model_for(ModelProvider::Qwen).map(str::to_string),
+        output_format: "stream-json".to_string(),
+        yolo: true,
+        append_system_prompt: None,
+        resume_session_id: None,
+        include_directories: Vec::new(),
+        allowed_mcp_server_names: mcp_server_names,
+        auth_type: Some(config::QWEN_AUTH_TYPE.to_string()),
+        extra_env,
+        runsc_image: optional_string_override(
+            overrides.and_then(|o| o.runsc_image.as_ref()),
+            "RUST_CHATBOT_BACKGROUND_RUNSC_IMAGE",
+        ), // Disabled fallback
+        runsc_workspace_includes: string_list_override(
+            overrides.and_then(|o| Some(&o.runsc_workspace_includes)),
+            BACKGROUND_RUNSC_WORKSPACE_INCLUDES_ENV,
+        ),
+        runsc_mounts: qwen_runsc_mounts(overrides),
+    }
+}
+fn ensure_repo_config_dir(path: &PathBuf) {
+    let _ = std::fs::create_dir_all(path);
+}
+fn ensure_minimax_layout(path: &PathBuf) {
+    ensure_repo_config_dir(path);
+
+    let _minimax_json = path.join(".minimax.json");
+    let claude_json = path.join(".claude.json");
+
+    if claude_json.exists() {
+        return;
+    }
+
+    #[cfg(unix)]
+    {
+        let _ = std::os::unix::fs::symlink(".minimax.json", &claude_json);
+    }
+
+    #[cfg(not(unix))]
+    {
+        if _minimax_json.exists() {
+            let _ = std::fs::copy(&_minimax_json, &claude_json);
+        }
+    }
+}
+pub fn to_provider_memory_context(
+    memory_context: Option<&MemoryContext>,
+) -> Option<ProviderMemoryContext> {
+    let memory_context = memory_context?;
+    Some(ProviderMemoryContext {
+        workspace_id: memory_context.workspace_id.clone(),
+        query: memory_context.query.clone(),
+        hits: memory_context
+            .hits
+            .iter()
+            .map(|hit| ProviderMemoryHit {
+                doc_key: hit.doc_key.clone(),
+                chat_id: hit.chat_id.clone(),
+                role: hit.role.clone(),
+                session_name: hit.session_name.clone(),
+                timestamp: hit.timestamp,
+                snippet: hit.snippet.clone(),
+                title: hit.title.clone(),
+                message_index: hit.message_index,
+                turn_index: hit.turn_index,
+                score: hit.score,
+            })
+            .collect(),
+    })
+}
+/// MiniMax API key from environment or key file.
+pub fn minimax_api_key() -> Option<String> {
+    provider_api_key(ModelProvider::MiniMax)
+}
