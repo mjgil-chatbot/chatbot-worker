@@ -1,3 +1,27 @@
+fn apply_anthropic_transport_overrides(
+    extra_env: &mut Vec<(String, String)>,
+    overrides: Option<&ProviderRequestOverrides>,
+    default_base_url: Option<String>,
+    default_auth_token: Option<String>,
+) {
+    let base_url = optional_string_override(
+        overrides.and_then(|overrides| overrides.anthropic_base_url.as_ref()),
+        TEST_ANTHROPIC_BASE_URL_ENV,
+    )
+    .or(default_base_url);
+    if let Some(base_url) = base_url {
+        upsert_env_var(extra_env, "ANTHROPIC_BASE_URL", base_url);
+    }
+
+    let auth_token = optional_string_override(
+        overrides.and_then(|overrides| overrides.anthropic_auth_token.as_ref()),
+        TEST_ANTHROPIC_AUTH_TOKEN_ENV,
+    )
+    .or(default_auth_token);
+    if let Some(auth_token) = auth_token {
+        upsert_env_var(extra_env, "ANTHROPIC_AUTH_TOKEN", auth_token);
+    }
+}
 fn push_runsc_mount(mounts: &mut Vec<RunscMount>, mount: RunscMount) {
     if !mount.host.exists() {
         return;
@@ -263,6 +287,27 @@ fn claude_compat_runsc_mounts(
         push_runsc_dirs_mounts(&mut mounts, runsc_dirs);
     }
     mounts
+}
+fn codex_runsc_mounts(overrides: Option<&ProviderRequestOverrides>) -> Vec<RunscMount> {
+    let mut mounts = Vec::new();
+    let codex_toml = resolved_codex_toml_path(overrides);
+    push_runsc_mount(&mut mounts, RunscMount::same_path(codex_toml));
+    if let Some(output_schema) = resolved_output_schema_path(overrides) {
+        push_runsc_mount(&mut mounts, RunscMount::same_path(output_schema));
+    }
+    if let Some(runsc_dirs) = overrides.and_then(|o| Some(&o.runsc_dirs)).filter(|d| !d.is_empty()) {
+        push_runsc_dirs_mounts(&mut mounts, runsc_dirs);
+    }
+    mounts
+}
+fn ensure_codex_home_dir(overrides: Option<&ProviderRequestOverrides>) -> PathBuf {
+    let codex_toml_path = resolved_codex_toml_path(overrides);
+    let codex_home = codex_toml_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| config::canonical_shared_root_dir().join(".codex"));
+    let _ = std::fs::create_dir_all(&codex_home);
+    codex_home
 }
 fn qwen_runsc_mounts(overrides: Option<&ProviderRequestOverrides>) -> Vec<RunscMount> {
     let mut mounts = Vec::new();

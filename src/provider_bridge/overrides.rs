@@ -16,23 +16,44 @@ pub struct ProviderRequestOverrides {
     pub runsc_workspace_includes: Vec<String>,
     pub runsc_dirs: Vec<String>,
 }
+
+const TEST_PROVIDER_CLI_ENV: &str = "RUST_CHATBOT_TEST_PROVIDER_CLI";
+const TEST_PROVIDER_CONFIG_DIR_ENV: &str = "RUST_CHATBOT_TEST_PROVIDER_CONFIG_DIR";
+const TEST_ANTHROPIC_BASE_URL_ENV: &str = "RUST_CHATBOT_TEST_ANTHROPIC_BASE_URL";
+const TEST_ANTHROPIC_AUTH_TOKEN_ENV: &str = "RUST_CHATBOT_TEST_ANTHROPIC_AUTH_TOKEN";
 const TEST_MCP_JSON_PATH_ENV: &str = "RUST_CHATBOT_TEST_MCP_JSON_PATH";
 const TEST_CLAUDE_JSON_PATH_ENV: &str = "RUST_CHATBOT_TEST_CLAUDE_JSON_PATH";
+const TEST_GEMINI_SETTINGS_PATH_ENV: &str = "RUST_CHATBOT_TEST_GEMINI_SETTINGS_PATH";
+const TEST_CODEX_TOML_PATH_ENV: &str = "RUST_CHATBOT_TEST_CODEX_TOML_PATH";
 const BACKGROUND_RUNSC_WORKSPACE_INCLUDES_ENV: &str =
     "RUST_CHATBOT_AUTONOMOUS_RUNSC_WORKSPACE_INCLUDES";
 const TASK_REPORT_VALIDATOR_RUNSC_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/scripts/validate_autonomous_task_report.py"
 );
+
 fn env_override(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
 }
+
+fn string_override(
+    explicit: Option<&String>,
+    env_name: &str,
+    default: impl FnOnce() -> String,
+) -> String {
+    explicit
+        .cloned()
+        .or_else(|| env_override(env_name))
+        .unwrap_or_else(default)
+}
+
 fn optional_string_override(explicit: Option<&String>, env_name: &str) -> Option<String> {
     explicit.cloned().or_else(|| env_override(env_name))
 }
+
 fn string_list_override(explicit: Option<&Vec<String>>, env_name: &str) -> Vec<String> {
     explicit.cloned().unwrap_or_else(|| {
         std::env::var(env_name)
@@ -41,6 +62,7 @@ fn string_list_override(explicit: Option<&Vec<String>>, env_name: &str) -> Vec<S
             .unwrap_or_default()
     })
 }
+
 fn path_override(
     explicit: Option<&PathBuf>,
     env_name: &str,
@@ -51,6 +73,7 @@ fn path_override(
         .or_else(|| env_override(env_name).map(PathBuf::from))
         .or_else(default)
 }
+
 fn upsert_env_var(extra_env: &mut Vec<(String, String)>, key: &str, value: String) {
     if let Some((_, existing)) = extra_env.iter_mut().find(|(name, _)| name == key) {
         *existing = value;

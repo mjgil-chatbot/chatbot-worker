@@ -111,6 +111,29 @@ fn gemini_runsc_settings_sidecar_path(source: &Path) -> PathBuf {
         .join("provider-bridge-gemini-settings")
         .join(format!("{source_hash:016x}.json"))
 }
+fn resolved_codex_toml_path(overrides: Option<&ProviderRequestOverrides>) -> PathBuf {
+    path_override(
+        overrides.and_then(|overrides| overrides.codex_toml_path.as_ref()),
+        TEST_CODEX_TOML_PATH_ENV,
+        || Some(PathBuf::from(config::codex_toml_path())),
+    )
+    .unwrap_or_else(|| PathBuf::from(config::codex_toml_path()))
+}
+fn resolved_codex_toml_paths(overrides: Option<&ProviderRequestOverrides>) -> Vec<PathBuf> {
+    let primary = resolved_codex_toml_path(overrides);
+    if overrides.is_some_and(|o| o.codex_toml_path.is_some()) {
+        return vec![primary];
+    }
+
+    let mut paths = vec![primary.clone()];
+    if let Some(home) = dirs::home_dir() {
+        let legacy = home.join(".codex").join("config.toml");
+        if !paths.contains(&legacy) {
+            paths.push(legacy);
+        }
+    }
+    paths
+}
 const MCP_COORDINATOR_SERVER_NAME: &str = "mcp-coordinator";
 const MCP_PROVIDER_PROFILE_CLAUDE: &str = "claude";
 const MCP_PROVIDER_PROFILE_CODEX: &str = "codex";
