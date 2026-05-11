@@ -5,6 +5,9 @@
 //! its accessor methods and replaces scattered constant tables.
 
 use crate::model::ModelProvider;
+
+// ── taxonomy enums ─────────────────────────────────────────────────────
+
 /// Transport-level grouping that determines which config builder family
 /// handles a provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +27,7 @@ pub enum TransportFamily {
     /// Kimi CLI wire format.
     KimiCli,
 }
+
 /// Output normalization strategy applied to provider responses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NormalizationKind {
@@ -31,6 +35,9 @@ pub enum NormalizationKind {
     Codex,
     Gemini,
 }
+
+// ── catalog entry ──────────────────────────────────────────────────────
+
 /// All static metadata for one runtime provider.
 pub struct ProviderEntry {
     pub provider: ModelProvider,
@@ -63,6 +70,9 @@ pub struct ProviderEntry {
     /// Case-insensitive aliases accepted by [`by_alias`] (includes the canonical id).
     pub aliases: &'static [&'static str],
 }
+
+// ── catalog array ──────────────────────────────────────────────────────
+
 /// All runtime providers.  Order is not significant but is kept
 /// stable for readability.
 pub static PROVIDERS: &[ProviderEntry] = &[
@@ -371,6 +381,9 @@ pub static PROVIDERS: &[ProviderEntry] = &[
         aliases: &["claw"],
     },
 ];
+
+// ── lookup helpers ─────────────────────────────────────────────────────
+
 /// Look up a catalog entry by its [`ModelProvider`] variant.
 ///
 /// # Panics
@@ -388,7 +401,183 @@ pub fn by_id(provider: ModelProvider) -> &'static ProviderEntry {
             )
         })
 }
+
 /// Look up a catalog entry by its shared-memory discriminant code.
 pub fn by_shm_code(code: u32) -> Option<&'static ProviderEntry> {
     PROVIDERS.iter().find(|e| e.shm_code == code)
+}
+
+/// Look up a catalog entry by any of its case-insensitive aliases.
+///
+/// This is the unified provider parser that replaces all ad hoc string
+/// tables.  It accepts the canonical id, the display name, and any
+/// additional aliases defined in the catalog entry.
+pub fn by_alias(name: &str) -> Option<&'static ProviderEntry> {
+    let lower = name.to_lowercase();
+    PROVIDERS.iter().find(|e| {
+        e.id == lower
+            || e.display_name.to_lowercase() == lower
+            || e.aliases.iter().any(|a| a.to_lowercase() == lower)
+    })
+}
+
+// ── tests ──────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn catalog_covers_all_providers() {
+        for provider in ModelProvider::ALL {
+            let entry = by_id(provider);
+            assert_eq!(entry.provider, provider);
+        }
+    }
+
+    #[test]
+    fn catalog_has_expected_entry_count() {
+        assert_eq!(PROVIDERS.len(), ModelProvider::ALL.len());
+        assert_eq!(PROVIDERS.len(), 16);
+    }
+
+    #[test]
+    fn no_duplicate_shm_codes() {
+        let mut codes: Vec<u32> = PROVIDERS.iter().map(|e| e.shm_code).collect();
+        codes.sort();
+        codes.dedup();
+        assert_eq!(codes.len(), PROVIDERS.len());
+    }
+
+    #[test]
+    fn no_duplicate_ids() {
+        let mut ids: Vec<&str> = PROVIDERS.iter().map(|e| e.id).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), PROVIDERS.len());
+    }
+
+    #[test]
+    fn shm_code_roundtrip_all_providers() {
+        for provider in ModelProvider::ALL {
+            let entry = by_id(provider);
+            let recovered = by_shm_code(entry.shm_code)
+                .unwrap_or_else(|| panic!("shm_code {} not found", entry.shm_code));
+            assert_eq!(recovered.provider, provider);
+        }
+    }
+
+    /// Assert the exact production shm-code assignments are preserved.
+    #[test]
+    fn shm_codes_match_production_values() {
+        assert_eq!(by_id(ModelProvider::Claude).shm_code, 0);
+        assert_eq!(by_id(ModelProvider::MiniMax).shm_code, 2);
+        assert_eq!(by_id(ModelProvider::Codex).shm_code, 3);
+        assert_eq!(by_id(ModelProvider::Gemini).shm_code, 4);
+        assert_eq!(by_id(ModelProvider::Qwen).shm_code, 5);
+        assert_eq!(by_id(ModelProvider::Nvidia).shm_code, 6);
+        assert_eq!(by_id(ModelProvider::OpenRouter).shm_code, 8);
+        assert_eq!(by_id(ModelProvider::OmniForge).shm_code, 9);
+        assert_eq!(by_id(ModelProvider::GeminiForge).shm_code, 10);
+        assert_eq!(by_id(ModelProvider::MiniMaxForge).shm_code, 11);
+        assert_eq!(by_id(ModelProvider::GeminiCliForge).shm_code, 12);
+        assert_eq!(by_id(ModelProvider::Kimi).shm_code, 13);
+        assert_eq!(by_id(ModelProvider::OpenCode).shm_code, 14);
+        assert_eq!(by_id(ModelProvider::Hermes).shm_code, 15);
+        assert_eq!(by_id(ModelProvider::Forge).shm_code, 16);
+        assert_eq!(by_id(ModelProvider::Claw).shm_code, 17);
+    }
+
+    #[test]
+    fn by_shm_code_out_of_range() {
+        assert!(by_shm_code(18).is_none()); // gaps: 1=GLM, 7=Nvidia-OpenRouter
+        assert!(by_shm_code(99).is_none());
+    }
+
+    #[test]
+    fn by_alias_canonical_id() {
+        for entry in PROVIDERS.iter() {
+            let found = by_alias(entry.id).expect("canonical id must resolve");
+            assert_eq!(found.provider, entry.provider);
+        }
+    }
+
+    #[test]
+    fn by_alias_display_name() {
+        for entry in PROVIDERS.iter() {
+            let found = by_alias(entry.display_name).expect("display name must resolve");
+            assert_eq!(found.provider, entry.provider);
+        }
+    }
+
+    #[test]
+    fn by_alias_case_insensitive() {
+        assert_eq!(by_alias("CLAUDE").unwrap().provider, ModelProvider::Claude);
+        assert_eq!(by_alias("Gemini").unwrap().provider, ModelProvider::Gemini);
+        assert_eq!(
+            by_alias("MiniMax").unwrap().provider,
+            ModelProvider::MiniMax
+        );
+        assert_eq!(by_alias("NVIDIA").unwrap().provider, ModelProvider::Nvidia);
+        assert_eq!(
+            by_alias("OmniForge").unwrap().provider,
+            ModelProvider::OmniForge
+        );
+        assert_eq!(
+            by_alias("GeminiForge").unwrap().provider,
+            ModelProvider::GeminiForge
+        );
+        assert_eq!(
+            by_alias("GeminiCliForge").unwrap().provider,
+            ModelProvider::GeminiCliForge
+        );
+        assert_eq!(
+            by_alias("MinimaxForge").unwrap().provider,
+            ModelProvider::MiniMaxForge
+        );
+    }
+
+    #[test]
+    fn by_alias_unknown() {
+        assert!(by_alias("gpt4").is_none());
+        assert!(by_alias("").is_none());
+    }
+
+    #[test]
+    fn one_to_one_coverage() {
+        // Every ModelProvider::ALL variant has exactly one catalog entry
+        let mut found = std::collections::HashSet::new();
+        for provider in ModelProvider::ALL {
+            let entry = by_id(provider);
+            assert!(
+                found.insert(entry.id),
+                "duplicate catalog entry for {:?}",
+                provider
+            );
+        }
+        // Every catalog entry maps to a variant in ALL
+        for entry in PROVIDERS.iter() {
+            assert!(
+                ModelProvider::ALL.contains(&entry.provider),
+                "catalog entry {:?} not in ModelProvider::ALL",
+                entry.id
+            );
+        }
+    }
+
+    #[test]
+    fn entry_id_matches_as_str() {
+        for provider in ModelProvider::ALL {
+            let entry = by_id(provider);
+            assert_eq!(entry.id, provider.as_str());
+        }
+    }
+
+    #[test]
+    fn entry_display_name_matches() {
+        for provider in ModelProvider::ALL {
+            let entry = by_id(provider);
+            assert_eq!(entry.display_name, provider.display_name());
+        }
+    }
 }
