@@ -61,6 +61,27 @@ impl ModelProvider {
         provider_catalog::by_id(*self).display_name
     }}
 impl ModelProvider {
+    /// Parse a provider name from any known alias (case-insensitive).
+    ///
+    /// This is the unified provider parser backed by the catalog.
+    /// It replaces all ad hoc string-match tables.
+    pub fn from_alias(value: &str) -> Option<Self> {
+        provider_catalog::by_alias(value).map(|e| e.provider)
+    }}
+impl ModelProvider {
+    pub fn from_supported_alias(value: &str) -> Option<Self> {
+        Self::from_alias(value).filter(|provider| provider.is_supported())
+    }}
+impl ModelProvider {
+    pub fn from_launch_alias(value: &str) -> Option<Self> {
+        Self::from_alias(value).filter(|provider| provider.is_launchable())
+    }}
+impl ModelProvider {
+    /// Legacy alias for [`Self::from_alias`].
+    pub fn from_arg(value: &str) -> Option<Self> {
+        Self::from_alias(value)
+    }}
+impl ModelProvider {
     /// Shared-memory discriminant code for this provider.
     pub fn shm_code(self) -> u32 {
         provider_catalog::by_id(self).shm_code
