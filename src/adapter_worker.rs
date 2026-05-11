@@ -88,6 +88,30 @@ fn ensure_minimax_adapter_layout(path: &Path) {
         }
     }
 }
+/// Map ModelProvider string to agent-adapter ProviderId.
+fn model_provider_to_provider_id(provider: &str) -> Result<ProviderId> {
+    let lower = provider.to_lowercase();
+    match lower.as_str() {
+        "claude" => Ok(ProviderId::Claude),
+        "minimax" => Ok(ProviderId::MiniMax),
+        "codex" => Ok(ProviderId::Codex),
+        "gemini" => Ok(ProviderId::Gemini),
+        "kimi" => Ok(ProviderId::Kimi),
+        "opencode" => Ok(ProviderId::OpenCode),
+        "hermes" => Ok(ProviderId::Hermes),
+        "forge" => Ok(ProviderId::Forge),
+        "claw" => Ok(ProviderId::Claw),
+        _ => {
+            // Try as a ModelProvider enum value
+            ModelProvider::from_alias(provider)
+                .map(|mp| {
+                    model_provider_to_provider_id(mp.as_str())
+                        .unwrap_or(ProviderId::Custom(provider.to_string()))
+                })
+                .ok_or_else(|| anyhow::anyhow!("Unknown provider: {}", provider))
+        }
+    }
+}
 /// Get provider string for CLI argument.
 fn provider_string(provider: &ProviderId) -> String {
     match provider {
