@@ -9,6 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::{mpsc, Arc};
+use crate::model::ModelProvider;
 use crate::worker::WorkerRequest;
 use crate::worker_ext;
 use anyhow::{Context, Result};
@@ -77,6 +78,10 @@ fn default_background_role() -> String {
 }
 fn default_background_context_budget() -> usize {
     0
+}
+fn parse_provider(provider: &str) -> Result<ModelProvider> {
+    ModelProvider::from_supported_alias(provider)
+        .ok_or_else(|| anyhow::anyhow!("Unknown provider: {provider}"))
 }
 fn parse_worker_extension_request(
     request: &WorkerRequest,
