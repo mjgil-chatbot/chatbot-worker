@@ -57,6 +57,7 @@ pub mod provider_bridge;
 pub mod provider_catalog;
 pub mod storage;
 pub mod stream;
+pub mod stream_output;
 pub mod worker;
 pub mod worker_ext;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
