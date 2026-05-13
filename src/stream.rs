@@ -5,6 +5,7 @@
 //! computed view derived from `TextDelta` events.
 
 pub use ai_providers::stream::*;
+
 use anyhow::{Context, Result};
 use chrono::{Local, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
@@ -12,7 +13,9 @@ use serde_json::Value;
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
+
 use crate::adapter_tool_call_schema::ToolCallLiveUpdate;
+
 const MAX_SERIALIZED_EVENT_BYTES: usize = 96 * 1024;
 const MAX_TEXT_EVENT_CHARS: usize = 24 * 1024;
 const MAX_SUMMARY_EVENT_CHARS: usize = 4 * 1024;
@@ -20,6 +23,7 @@ const MAX_ERROR_EVENT_CHARS: usize = 8 * 1024;
 const MAX_TOOL_NAME_CHARS: usize = 256;
 const MAX_TOOL_VALUE_BYTES: usize = 32 * 1024;
 const MAX_TOOL_VALUE_PREVIEW_CHARS: usize = 2 * 1024;
+
 /// A structured event emitted during worker execution.
 ///
 /// Workers append these as newline-delimited JSON to `events.jsonl`.
@@ -75,6 +79,7 @@ pub enum StreamEvent {
         timestamp_ms: i64,
     },
 }
+
 impl StreamEvent {
     /// Create a `TextDelta` event with the current timestamp.
     pub fn text_delta(content: impl Into<String>) -> Self {
@@ -82,16 +87,16 @@ impl StreamEvent {
             content: content.into(),
             timestamp_ms: Utc::now().timestamp_millis(),
         }
-    }}
-impl StreamEvent {
+    }
+
     /// Create a `LiveSummary` event with the current timestamp.
     pub fn live_summary(content: impl Into<String>) -> Self {
         Self::LiveSummary {
             content: content.into(),
             timestamp_ms: Utc::now().timestamp_millis(),
         }
-    }}
-impl StreamEvent {
+    }
+
     /// Create a `ToolStart` event with the current timestamp.
     pub fn tool_start(tool: impl Into<String>, input: Value) -> Self {
         Self::ToolStart {
@@ -100,8 +105,8 @@ impl StreamEvent {
             live_update: None,
             timestamp_ms: Utc::now().timestamp_millis(),
         }
-    }}
-impl StreamEvent {
+    }
+
     /// Create a `ToolEnd` event with the current timestamp.
     pub fn tool_end(tool: impl Into<String>, output: Value) -> Self {
         Self::ToolEnd {
@@ -110,16 +115,16 @@ impl StreamEvent {
             live_update: None,
             timestamp_ms: Utc::now().timestamp_millis(),
         }
-    }}
-impl StreamEvent {
+    }
+
     /// Create an `Error` event with the current timestamp.
     pub fn error(message: impl Into<String>) -> Self {
         Self::Error {
             message: message.into(),
             timestamp_ms: Utc::now().timestamp_millis(),
         }
-    }}
-impl StreamEvent {
+    }
+
     /// Create a `CostUpdate` event with the current timestamp.
     pub fn cost_update(input_tokens: u64, output_tokens: u64) -> Self {
         Self::CostUpdate {
@@ -127,7 +132,11 @@ impl StreamEvent {
             output_tokens,
             timestamp_ms: Utc::now().timestamp_millis(),
         }
-    }}
+    }
+}
+
+// ── JSONL persistence ──────────────────────────────────────────────
+
 /// Append a single event as a JSONL line to the given file path.
 ///
 /// Creates the parent directory and file if they do not exist.
@@ -148,6 +157,7 @@ pub fn append_event(path: &Path, event: &StreamEvent) -> Result<()> {
         .with_context(|| format!("failed to append to event log {}", path.display()))?;
     Ok(())
 }
+
 fn sanitize_event_for_spool(event: &StreamEvent) -> StreamEvent {
     match event {
         StreamEvent::TextDelta {
@@ -210,6 +220,7 @@ fn sanitize_event_for_spool(event: &StreamEvent) -> StreamEvent {
         },
     }
 }
+
 fn bound_event_size(event: &StreamEvent) -> StreamEvent {
     match serde_json::to_vec(event) {
         Ok(bytes) if bytes.len() <= MAX_SERIALIZED_EVENT_BYTES => event.clone(),
@@ -217,6 +228,7 @@ fn bound_event_size(event: &StreamEvent) -> StreamEvent {
         Err(_) => minimal_event(event, 0),
     }
 }
+
 fn minimal_event(event: &StreamEvent, serialized_bytes: usize) -> StreamEvent {
     match event {
         StreamEvent::TextDelta {
@@ -279,6 +291,7 @@ fn minimal_event(event: &StreamEvent, serialized_bytes: usize) -> StreamEvent {
         },
     }
 }
+
 fn truncate_value(value: &Value) -> Value {
     let serialized = match serde_json::to_string(value) {
         Ok(serialized) => serialized,
@@ -301,6 +314,7 @@ fn truncate_value(value: &Value) -> Value {
         "original_bytes": serialized.len(),
     })
 }
+
 fn truncated_value_stub(serialized_bytes: usize) -> Value {
     serde_json::json!({
         "truncated": true,
@@ -308,6 +322,7 @@ fn truncated_value_stub(serialized_bytes: usize) -> Value {
         "original_bytes": serialized_bytes,
     })
 }
+
 fn truncate_string(value: &str, max_chars: usize) -> String {
     let total_chars = value.chars().count();
     if total_chars <= max_chars {
@@ -327,6 +342,7 @@ fn truncate_string(value: &str, max_chars: usize) -> String {
     truncated.push_str(&suffix);
     truncated
 }
+
 /// Parse all events from a JSONL file.  Returns an empty vec if the file
 /// does not exist.  Malformed lines are skipped with a warning.
 pub fn read_events(path: &Path) -> Vec<StreamEvent> {
@@ -365,6 +381,7 @@ pub fn read_events(path: &Path) -> Vec<StreamEvent> {
     }
     events
 }
+
 /// Read events starting from a byte offset.  Returns the new events and
 /// the updated byte offset for the next call.
 pub fn read_events_since(path: &Path, offset: u64) -> (Vec<StreamEvent>, u64) {
@@ -411,6 +428,7 @@ pub fn read_events_since(path: &Path, offset: u64) -> (Vec<StreamEvent>, u64) {
     }
     (events, bytes_read)
 }
+
 /// Append flat text output for a sequence of events onto an existing transcript.
 ///
 /// This reconstructs the backward-compatible `output` file content by
@@ -443,15 +461,18 @@ pub fn append_output_from_events(transcript: &mut String, events: &[StreamEvent]
         }
     }
 }
+
 /// Compute the flat text output from a sequence of events.
 pub fn compute_output_from_events(events: &[StreamEvent]) -> String {
     let mut transcript = String::new();
     append_output_from_events(&mut transcript, events);
     transcript
 }
+
 fn format_live_summary_line(timestamp_ms: i64, content: &str) -> String {
     format_timestamped_transcript_line(timestamp_ms, content)
 }
+
 fn format_timestamped_transcript_line(timestamp_ms: i64, content: &str) -> String {
     if timestamp_ms <= 0 {
         return content.to_string();
@@ -461,6 +482,7 @@ fn format_timestamped_transcript_line(timestamp_ms: i64, content: &str) -> Strin
         None => content.to_string(),
     }
 }
+
 fn append_timestamped_transcript_lines(output: &mut String, timestamp_ms: i64, content: &str) {
     for line in content.split('\n').filter(|line| !line.is_empty()) {
         push_transcript_line(
@@ -469,13 +491,19 @@ fn append_timestamped_transcript_lines(output: &mut String, timestamp_ms: i64, c
         );
     }
 }
+
 fn push_transcript_line(output: &mut String, line: &str) {
     if !output.is_empty() {
         output.push('\n');
     }
     output.push_str(line);
 }
+
 /// Path to the event log file for a worker spool directory.
 pub fn events_path(worker_dir: &Path) -> PathBuf {
     worker_dir.join("events.jsonl")
 }
+
+#[cfg(test)]
+#[path = "stream_tests.rs"]
+mod tests;
