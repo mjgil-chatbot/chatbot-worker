@@ -10,7 +10,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 use crate::model::ModelProvider;
-use crate::summary::JsonSummary;
+use crate::summary::{JsonSummary, TurnUsage};
 mod manager;
 mod provider_normalization;
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
@@ -132,6 +132,17 @@ pub struct SessionLogSnapshot {
     pub last_message_at: Option<DateTime<Utc>>,
     pub history_fingerprint: u64,
 }
+pub fn session_log_snapshot(session: &ChatSession) -> SessionLogSnapshot {
+    let user_messages = session.messages.iter().filter(|m| m.is_user).count();
+    SessionLogSnapshot {
+        total_messages: session.messages.len(),
+        user_messages,
+        assistant_messages: session.messages.len().saturating_sub(user_messages),
+        first_message_at: session.messages.first().map(|message| message.timestamp),
+        last_message_at: session.messages.last().map(|message| message.timestamp),
+        history_fingerprint: session.history_fingerprint(),
+    }
+}
 #[derive(Clone)]
 pub struct DataManager {
     data_dir: PathBuf,
@@ -143,6 +154,117 @@ impl Drop for MetadataLock {
         let _ = self.0.unlock();
     }
 }
+impl ChatSession {
+    pub fn add_message(&mut self, content: String, is_user: bool) {
+        self.messages.push(ChatMessage {
+            content,
+            is_user,
+            timestamp: Utc::now(),
+            command: None,
+            retrieved_memory: None,
+        });
+        self.updated_at = Utc::now();
+    }}
+impl ChatSession {
+    pub fn add_message_with_command(
+        &mut self,
+        content: String,
+        is_user: bool,
+        command: Option<String>,
+    ) {
+        self.messages.push(ChatMessage {
+            content,
+            is_user,
+            timestamp: Utc::now(),
+            command,
+            retrieved_memory: None,
+        });
+        self.updated_at = Utc::now();
+    }}
+impl ChatSession {
+    /// Update the last assistant message content, or add a new assistant
+    /// message if the last message is from the user (or there are no messages).
+    pub fn update_or_add_assistant_message(&mut self, content: String) {
+        if let Some(last) = self.messages.last_mut() {
+            if !last.is_user {
+                last.content = content;
+                self.updated_at = Utc::now();
+                return;
+            }
+        }
+        self.add_message(content, false);
+    }}
+impl ChatSession {
+    pub fn update_user_message_request_metadata(
+        &mut self,
+        message_timestamp_ms: i64,
+        command: Option<String>,
+        retrieved_memory: Option<String>,
+    ) -> Result<()> {
+        let Some(message) = self.messages.iter_mut().find(|message| {
+            message.is_user && message.timestamp.timestamp_millis() == message_timestamp_ms
+        }) else {
+            anyhow::bail!("pending user message disappeared before request metadata update");
+        };
+        message.command = command;
+        message.retrieved_memory = retrieved_memory;
+        self.updated_at = Utc::now();
+        Ok(())
+    }}
+impl ChatSession {
+    pub fn set_system_prompt(&mut self, prompt: Option<String>) {
+        self.system_prompt = prompt;
+        self.updated_at = Utc::now();
+    }}
+impl ChatSession {
+    pub fn history_fingerprint(&self) -> u64 {
+        let mut hash = FNV_OFFSET_BASIS;
+        hash = fnv_hash_bytes(hash, self.id.as_bytes());
+        hash = fnv_hash_bytes(hash, self.name.as_bytes());
+        hash = fnv_hash_bytes(hash, self.created_at.timestamp().to_le_bytes().as_ref());
+        hash = fnv_hash_bytes(
+            hash,
+            self.created_at
+                .timestamp_subsec_nanos()
+                .to_le_bytes()
+                .as_ref(),
+        );
+        hash = fnv_hash_bytes(hash, self.updated_at.timestamp().to_le_bytes().as_ref());
+        hash = fnv_hash_bytes(
+            hash,
+            self.updated_at
+                .timestamp_subsec_nanos()
+                .to_le_bytes()
+                .as_ref(),
+        );
+
+        if let Some(prompt) = self.system_prompt.as_ref() {
+            hash = fnv_hash_bytes(hash, prompt.as_bytes());
+        }
+
+        for message in &self.messages {
+            hash = fnv_hash_bytes(hash, &[u8::from(message.is_user)]);
+            hash = fnv_hash_bytes(hash, message.timestamp.timestamp().to_le_bytes().as_ref());
+            hash = fnv_hash_bytes(
+                hash,
+                message
+                    .timestamp
+                    .timestamp_subsec_nanos()
+                    .to_le_bytes()
+                    .as_ref(),
+            );
+            hash = fnv_hash_bytes(hash, message.content.as_bytes());
+            if let Some(command) = message.command.as_ref() {
+                hash = fnv_hash_bytes(hash, command.as_bytes());
+            }
+            if let Some(retrieved_memory) = message.retrieved_memory.as_ref() {
+                hash = fnv_hash_bytes(hash, retrieved_memory.as_bytes());
+            }
+            hash = fnv_hash_bytes(hash, &[0xff]);
+        }
+
+        hash
+    }}
 fn fnv_hash_bytes(mut hash: u64, bytes: &[u8]) -> u64 {
     for byte in bytes {
         hash ^= u64::from(*byte);
@@ -150,3 +272,5 @@ fn fnv_hash_bytes(mut hash: u64, bytes: &[u8]) -> u64 {
     }
     hash
 }
+#[cfg(test)]
+mod inline_tests;
