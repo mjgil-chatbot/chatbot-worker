@@ -4,8 +4,10 @@
 //! storage helpers, and the canonical `chatbot-worker` implementation.
 
 use std::path::Path;
+
 const MANAGED_LOCAL_BIN_MARKER: &str = "# managed by rust-chatbot";
 const SEMBLE_WRAPPER_NAME: &str = "semble";
+
 fn shell_double_quoted(value: &str) -> String {
     let escaped = value
         .replace('\\', "\\\\")
@@ -14,6 +16,7 @@ fn shell_double_quoted(value: &str) -> String {
         .replace('`', "\\`");
     format!("\"{escaped}\"")
 }
+
 fn managed_semble_wrapper_script() -> String {
     let semble_root = crate::config::checkout_root()
         .join("semble-rs")
@@ -33,6 +36,7 @@ fi\n\
 exec cargo run --release --quiet --manifest-path \"$MANIFEST\" --bin semble -- \"$@\"\n"
     )
 }
+
 pub mod adapter_git_verifier;
 pub mod adapter_live_summary;
 pub mod adapter_tool_call_schema;
@@ -63,6 +67,8 @@ pub mod sync;
 pub mod worker;
 pub mod worker_ext;
 pub mod worker_process;
+pub mod workspace;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AgentRole {
     Orchestrator,
@@ -71,13 +77,16 @@ pub enum AgentRole {
     Worker,
     DeepWorker,
 }
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AutonomousExecutionEnvironment {
     Host,
     Runsc,
 }
+
 /// Shared test lock for tests that mutate the `HOME` environment variable.
 pub static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Ensure the user-local bin directory has a symlink to the current executable
 /// and provision managed helper wrappers used by provider runtimes.
 pub fn ensure_path_symlink() {
@@ -96,6 +105,7 @@ pub fn ensure_path_symlink() {
     let semble_wrapper = managed_semble_wrapper_script();
     ensure_managed_local_bin_script(&bin_dir, SEMBLE_WRAPPER_NAME, &semble_wrapper);
 }
+
 fn ensure_local_bin_symlink(bin_dir: &Path, name: &str, exe: &Path) {
     let link = bin_dir.join(name);
     if link.read_link().ok().as_deref() == Some(exe) {
@@ -112,6 +122,7 @@ fn ensure_local_bin_symlink(bin_dir: &Path, name: &str, exe: &Path) {
     }
     let _ = std::os::unix::fs::symlink(exe, &link);
 }
+
 fn ensure_managed_local_bin_script(bin_dir: &Path, name: &str, contents: &str) {
     let path = bin_dir.join(name);
     match std::fs::read_to_string(&path) {
@@ -135,6 +146,7 @@ fn ensure_managed_local_bin_script(bin_dir: &Path, name: &str, contents: &str) {
         }
     }
 }
+
 #[cfg(test)]
 mod local_bin_tests {
     use super::*;

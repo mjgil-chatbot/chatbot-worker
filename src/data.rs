@@ -10,6 +10,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 use crate::model::ModelProvider;
+use crate::summary::JsonSummary;
 mod manager;
 mod provider_normalization;
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
@@ -67,6 +68,46 @@ pub struct ChatMessage {
     pub command: Option<String>, // The CLI command that was executed
     #[serde(default)]
     pub retrieved_memory: Option<String>, // Retrieved memory preview shown alongside the turn
+}
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ChatSession {
+    pub id: String,
+    pub name: String,
+    pub system_prompt: Option<String>,
+    #[serde(default)]
+    pub json_summary: Option<JsonSummary>,
+    pub claude_session_id: Option<String>, // Claude CLI session ID for interactive mode
+    pub minimax_session_id: Option<String>, // MiniMax Claude-compatible session ID
+    pub qwen_session_id: Option<String>,   // Qwen OpenRouter session ID
+    pub codex_session_id: Option<String>,  // Codex CLI session ID for resume mode
+    #[serde(default, alias = "nemotron_session_id")]
+    pub nvidia_session_id: Option<String>, // Nvidia (Nemotron) Codex-compatible session ID
+    pub gemini_session_id: Option<String>, // Gemini CLI session ID for resume mode
+    #[serde(default)]
+    pub openrouter_session_id: Option<String>, // OpenRouter session ID for resume mode
+    #[serde(default)]
+    pub omniforge_session_id: Option<String>, // OmniForge compatibility session ID
+    #[serde(default)]
+    pub omniforge_model_id: Option<String>, // Selected OmniForge model catalog id
+    #[serde(default)]
+    pub kimi_session_id: Option<String>, // Kimi CLI session ID for resume mode
+    #[serde(default)]
+    pub opencode_session_id: Option<String>, // OpenCode CLI session ID (not used, but present for completeness)
+    #[serde(default)]
+    pub hermes_session_id: Option<String>, // Hermes Agent session ID for resume mode
+    #[serde(default)]
+    pub forge_session_id: Option<String>, // Forge session ID (not used, but present for completeness)
+    #[serde(default)]
+    pub claw_session_id: Option<String>, // Claw session ID (not used, but present for completeness)
+    #[serde(default)]
+    pub launched_from: Option<String>, // Directory from which the desktop was launched
+    #[serde(default)]
+    pub runsc_dirs: Vec<String>, // Directories to mount into the runsc container
+    #[serde(default)]
+    pub runsc_image: Option<String>, // Optional per-session runsc image override
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub messages: Vec<ChatMessage>,
 }
 #[derive(Serialize, Deserialize, Default)]
 pub struct SessionMetadata {
