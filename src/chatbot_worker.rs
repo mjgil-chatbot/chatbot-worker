@@ -74,6 +74,17 @@ struct BackgroundDispatchTaskRequest {
     #[serde(default = "default_background_context_budget")]
     context_budget: usize,
 }
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "tool", rename_all = "snake_case")]
+enum WorkerExtensionResponse {
+    BackgroundDispatch {
+        max_concurrent: usize,
+        merged: worker_ext::background::MergedResults,
+    },
+    AstSearch {
+        result: worker_ext::ast_search::AstSearchResponse,
+    },
+}
 fn default_background_role() -> String {
     "worker".to_string()
 }

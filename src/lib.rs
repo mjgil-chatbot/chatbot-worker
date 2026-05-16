@@ -62,6 +62,7 @@ pub mod summary;
 pub mod sync;
 pub mod worker;
 pub mod worker_ext;
+pub mod worker_process;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AgentRole {
     Orchestrator,
