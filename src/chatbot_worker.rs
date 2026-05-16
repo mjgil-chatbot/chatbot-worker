@@ -94,6 +94,18 @@ fn parse_worker_extension_request(
         serde_json::from_str(&request.query).context("failed to parse worker extension request")?;
     Ok(Some(parsed))
 }
+fn run_ast_search(
+    pattern: String,
+    language: worker_ext::ast_search::Language,
+    paths: Vec<String>,
+) -> Result<worker_ext::ast_search::AstSearchResponse> {
+    let tool = worker_ext::ast_search::AstSearchTool::new(
+        pattern,
+        language,
+        paths.into_iter().map(PathBuf::from).collect(),
+    );
+    tool.execute().map_err(anyhow::Error::msg)
+}
 fn complete_worker_request(
     chat_id: &str,
     output_path: &Path,
