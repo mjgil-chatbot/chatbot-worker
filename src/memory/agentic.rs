@@ -5,6 +5,7 @@ use agentic_memory::EvidenceSource as AgentEvidenceSource;
 use agentic_memory::InMemoryAgentStore;
 use agentic_memory::MemoryHeader;
 use agentic_memory::MemoryPacketItem;
+use agentic_memory::Scope;
 use anyhow::{Context, Result};
 use std::collections::{BTreeSet, HashSet};
 const AGENT_MEMORY_MIN_SIMILARITY: f64 = 0.12;
@@ -23,6 +24,52 @@ fn load_agent_memory_store(paths: &WorkspaceMemoryPaths) -> Result<Option<InMemo
             )
         })?;
     Ok(Some(store))
+}
+fn session_episodes(
+    paths: &WorkspaceMemoryPaths,
+    session: &ChatSession,
+    final_state: Option<&str>,
+) -> Vec<EpisodicTrace> {
+    let mut episodes = Vec::new();
+
+    for (message_index, message) in session.messages.iter().enumerate() {
+        if message.is_user {
+            continue;
+        }
+        let Some((goal, turn_index)) = preceding_user_goal(session, message_index) else {
+            continue;
+        };
+        let body = sanitize_memory_text(&indexed_message_content(message));
+        if body.is_empty() {
+            continue;
+        }
+
+        let doc_key = format!("{}:{}:assistant", session.id, message_index);
+        let mut episode = EpisodicTrace::new(
+            Scope::project(paths.workspace_id.clone()),
+            goal.clone(),
+            format!("state:{doc_key}"),
+        );
+        episode.header.tags = vec![
+            format!("doc_key:{doc_key}"),
+            format!("chat_id:{}", session.id),
+            format!("session_name:{}", sanitize_memory_text(&session.name)),
+            format!("role:assistant"),
+            format!("message_index:{message_index}"),
+            format!("turn_index:{turn_index}"),
+            format!("timestamp:{}", message.timestamp.to_rfc3339()),
+        ];
+        episode.action_labels = extract_action_labels(&message.content);
+        episode.observations = extract_observations(&body);
+        episode.successful_patterns = extract_successful_patterns(&body);
+        episode.final_outcome = episode_outcome_text(
+            &body,
+            final_state.filter(|_| is_last_message(session, message_index)),
+        );
+        episodes.push(episode);
+    }
+
+    episodes
 }
 fn packet_item_to_hit(store: &InMemoryAgentStore, item: MemoryPacketItem) -> Option<MemoryHit> {
     let header = find_memory_header(store, &item.id)?;
@@ -122,6 +169,20 @@ fn parse_source_meta(tags: &[String]) -> Option<SourceMeta> {
     meta.doc_key.as_ref()?;
     Some(meta)
 }
+fn preceding_user_goal(session: &ChatSession, message_index: usize) -> Option<(String, usize)> {
+    session.messages[..message_index]
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, message)| message.is_user)
+        .map(|(index, message)| {
+            (
+                sanitize_memory_text(&message.content),
+                message_turn_index(session, index),
+            )
+        })
+        .filter(|(goal, _)| !goal.is_empty())
+}
 fn extract_action_labels(content: &str) -> Vec<String> {
     let mut seen = BTreeSet::new();
     let mut labels = Vec::new();
@@ -197,6 +258,9 @@ fn episode_outcome_text(body: &str, final_state: Option<&str>) -> String {
             }
         }
     }
+}
+fn is_last_message(session: &ChatSession, message_index: usize) -> bool {
+    message_index + 1 == session.messages.len()
 }
 fn truncate_text(value: &str, max_chars: usize) -> String {
     if value.chars().count() <= max_chars {

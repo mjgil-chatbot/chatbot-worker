@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use crate::data::ChatMessage;
+use crate::data::{session_log_snapshot, ChatMessage, ChatSession};
 mod agentic;
 mod backend;
 mod retrieval_filters;
@@ -259,6 +259,39 @@ fn acquire_writer_lock(paths: &WorkspaceMemoryPaths) -> Result<WriterLock> {
 
     unreachable!("writer lock loop should return before exhaustion");
 }
+fn should_rebuild_workspace(sessions: &[&ChatSession], state: &IngestState) -> bool {
+    let current_ids: HashSet<&str> = sessions.iter().map(|session| session.id.as_str()).collect();
+    for chat_id in state.sessions.keys() {
+        if !current_ids.contains(chat_id.as_str()) {
+            return true;
+        }
+    }
+
+    for session in sessions {
+        let Some(indexed) = state.sessions.get(&session.id) else {
+            continue;
+        };
+        let message_count = session.messages.len();
+        if indexed.indexed_message_count > message_count {
+            return true;
+        }
+
+        let fingerprint = session_history_fingerprint(session);
+        if indexed.indexed_message_count == message_count {
+            if indexed.history_fingerprint != fingerprint {
+                return true;
+            }
+            continue;
+        }
+
+        let prefix_fingerprint = session_prefix_fingerprint(session, indexed.indexed_message_count);
+        if indexed.history_fingerprint != prefix_fingerprint {
+            return true;
+        }
+    }
+
+    false
+}
 fn indexed_message_content(message: &ChatMessage) -> String {
     if message.is_user {
         return message.content.clone();
@@ -353,6 +386,33 @@ fn looks_like_standard_model_label(label: &str) -> bool {
         ]
         .iter()
         .any(|token| lower.contains(token))
+}
+fn message_turn_index(session: &ChatSession, message_index: usize) -> usize {
+    session.messages[..=message_index]
+        .iter()
+        .filter(|message| message.is_user)
+        .count()
+        .saturating_sub(1)
+}
+fn build_session_ingest_state(session: &ChatSession) -> SessionIngestState {
+    SessionIngestState {
+        indexed_message_count: session.messages.len(),
+        history_fingerprint: session_history_fingerprint(session),
+        updated_at: Utc::now(),
+    }
+}
+fn session_history_fingerprint(session: &ChatSession) -> String {
+    format!("{:016x}", session_log_snapshot(session).history_fingerprint)
+}
+fn session_prefix_fingerprint(session: &ChatSession, message_count: usize) -> String {
+    let mut prefix = session.clone();
+    prefix.messages.truncate(message_count);
+    prefix.updated_at = prefix
+        .messages
+        .last()
+        .map(|message| message.timestamp)
+        .unwrap_or(prefix.created_at);
+    session_history_fingerprint(&prefix)
 }
 struct WriterLock(std::fs::File);
 impl Drop for WriterLock {
