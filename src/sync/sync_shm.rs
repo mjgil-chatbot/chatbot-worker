@@ -1,17 +1,20 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+
 use fs2::FileExt;
 use memmap2::MmapMut;
 use rust_debug::tracing::{debug, info, warn};
 use zerocopy::byteorder::little_endian::U64 as ZcU64;
 use zerocopy::{FromBytes, IntoBytes};
+
 use crate::model::ModelProvider;
 use crate::AgentRole;
+
 use super::layout::*;
-use super::util::is_pid_alive;
-use super::util::provider_from_u32;
-use super::util::provider_to_u32;
+use super::util::{is_pid_alive, provider_from_u32, provider_to_u32, read_u64_acquire};
+// ── the sync handle ──────────────────────────────────────────────────
+
 /// Handle to the shared memory region.
 ///
 /// Each application instance creates one of these on startup and drops
@@ -28,8 +31,40 @@ pub struct SyncShm {
     #[allow(dead_code)]
     pub(super) shm_path: PathBuf,
 }
+
 impl SyncShm {
     // ── construction ─────────────────────────────────────────────────
+
+    /// Open (or create) the shared memory region and register this instance.
+    pub fn open(provider: ModelProvider) -> anyhow::Result<Self> {
+        let (mmap, shm_path) = open_or_create_shm()?;
+
+        let mut shm = Self {
+            mmap,
+            our_pid: std::process::id(),
+            registered: true,
+            last_seen_sessions_version: 0,
+            shm_path,
+        };
+
+        // Ensure magic/version are set (first instance initializes).
+        shm.ensure_initialized();
+
+        // Seed from the current value so sessions_changed() doesn't
+        // spuriously return true on the very first call.
+        shm.last_seen_sessions_version = shm.read_sessions_version();
+
+        // Register ourselves in the instance registry.
+        shm.register_instance(provider);
+
+        info!(
+            pid = shm.our_pid,
+            provider = provider.as_str(),
+            "sync shm opened"
+        );
+
+        Ok(shm)
+    }
 
     /// Open the shared memory region in read-only mode (no registration).
     /// Returns `None` if the region doesn't exist or isn't initialized.
@@ -54,65 +89,53 @@ impl SyncShm {
         shm.last_seen_sessions_version = shm.read_sessions_version();
 
         Some(shm)
-    }}
-impl SyncShm {
-    // ── construction ─────────────────────────────────────────────────
+    }
 
     pub fn our_pid(&self) -> u32 {
         self.our_pid
-    }}
-impl SyncShm {
-    // ── construction ─────────────────────────────────────────────────
+    }
+
+    // ── typed accessors ─────────────────────────────────────────────
 
     fn header(&self) -> &ShmHeader {
         ShmHeader::ref_from_prefix(self.mmap.as_ref()).unwrap().0
-    }}
-impl SyncShm {
-    // ── construction ─────────────────────────────────────────────────
+    }
 
     pub(super) fn header_mut(&mut self) -> &mut ShmHeader {
         ShmHeader::mut_from_prefix(self.mmap.as_mut()).unwrap().0
-    }}
-impl SyncShm {
-    // ── construction ─────────────────────────────────────────────────
+    }
 
     fn registry(&self) -> &InstanceRegistryRaw {
         let start = HEADER_SIZE;
         let end = start + REGISTRY_SIZE;
         InstanceRegistryRaw::ref_from_bytes(&self.mmap.as_ref()[start..end]).unwrap()
-    }}
-impl SyncShm {
-    // ── construction ─────────────────────────────────────────────────
+    }
 
     fn registry_mut(&mut self) -> &mut InstanceRegistryRaw {
         let start = HEADER_SIZE;
         let end = start + REGISTRY_SIZE;
         InstanceRegistryRaw::mut_from_bytes(&mut self.mmap.as_mut()[start..end]).unwrap()
-    }}
-impl SyncShm {
-    // ── construction ─────────────────────────────────────────────────
+    }
 
     fn worker_registry(&self) -> &WorkerRegistryRaw {
         let start = WORKER_REGISTRY_OFFSET;
         let end = start + WORKER_REGISTRY_SIZE;
         WorkerRegistryRaw::ref_from_bytes(&self.mmap.as_ref()[start..end]).unwrap()
-    }}
-impl SyncShm {
-    // ── construction ─────────────────────────────────────────────────
+    }
+
+    // ── public query methods ────────────────────────────────────────
 
     /// Return the magic value from the header.
     pub fn magic(&self) -> u32 {
         self.header().magic.get()
-    }}
-impl SyncShm {
-    // ── construction ─────────────────────────────────────────────────
+    }
 
     /// Return the version from the header.
     pub fn version(&self) -> u32 {
         self.header().version.get()
-    }}
-impl SyncShm {
-    // ── construction ─────────────────────────────────────────────────
+    }
+
+    // ── session list sync ────────────────────────────────────────────
 
     /// Bump the sessions_version counter.  Call this after creating,
     /// deleting, or renaming a session so other instances reload.
@@ -121,9 +144,7 @@ impl SyncShm {
         let ptr = &header.sessions_version as *const ZcU64 as *const AtomicU64;
         let new_val = unsafe { &*ptr }.fetch_add(1, Ordering::AcqRel) + 1;
         debug!(sessions_version = new_val, "sync: sessions version bumped");
-    }}
-impl SyncShm {
-    // ── construction ─────────────────────────────────────────────────
+    }
 
     /// Read the current sessions_version from shared memory.
     fn read_sessions_version(&self) -> u64 {
@@ -133,9 +154,7 @@ impl SyncShm {
         }
         let ptr = &header.sessions_version as *const ZcU64 as *const AtomicU64;
         unsafe { &*ptr }.load(Ordering::Acquire)
-    }}
-impl SyncShm {
-    // ── construction ─────────────────────────────────────────────────
+    }
 
     /// Check whether the sessions list has been modified by another instance.
     /// Returns `true` (and updates internal tracking) if so.
@@ -147,9 +166,9 @@ impl SyncShm {
         } else {
             false
         }
-    }}
-impl SyncShm {
-    // ── construction ─────────────────────────────────────────────────
+    }
+
+    // ── instance registry ────────────────────────────────────────────
 
     /// List all registered instances (including dead ones — caller should
     /// check PIDs).
@@ -169,9 +188,7 @@ impl SyncShm {
             });
         }
         entries
-    }}
-impl SyncShm {
-    // ── construction ─────────────────────────────────────────────────
+    }
 
     /// Return only instances whose PID is still alive.
     pub fn live_instances(&self) -> Vec<InstanceEntry> {
@@ -179,9 +196,7 @@ impl SyncShm {
             .into_iter()
             .filter(|entry| process_identity_matches(entry.pid, entry.identity_token))
             .collect()
-    }}
-impl SyncShm {
-    // ── construction ─────────────────────────────────────────────────
+    }
 
     pub(super) fn register_instance(&mut self, provider: ModelProvider) {
         let Some(identity_token) = current_process_identity_token(self.our_pid) else {
@@ -239,9 +254,7 @@ impl SyncShm {
 
         debug!(pid = our_pid, slot = idx, "sync: instance registered");
         let _ = lock.unlock();
-    }}
-impl SyncShm {
-    // ── construction ─────────────────────────────────────────────────
+    }
 
     pub(super) fn unregister_instance(&mut self) {
         let lock = match open_registry_lock_file() {
@@ -272,9 +285,7 @@ impl SyncShm {
             }
         }
         let _ = lock.unlock();
-    }}
-impl SyncShm {
-    // ── construction ─────────────────────────────────────────────────
+    }
 
     /// Update this instance's role in the shared-memory registry.
     /// This allows the instance to declare its agent profile (role) after initial registration.
@@ -305,9 +316,9 @@ impl SyncShm {
             }
         }
         let _ = lock.unlock();
-    }}
-impl SyncShm {
-    // ── construction ─────────────────────────────────────────────────
+    }
+
+    // ── legacy worker registry ───────────────────────────────────────
 
     /// Free a worker slot (zero slot + stream buffer).
     pub fn free_worker_slot(&mut self, slot: usize) {
@@ -317,9 +328,50 @@ impl SyncShm {
         buf[base..base + WORKER_SLOT_SIZE].fill(0);
         buf[data_base..data_base + WORKER_STREAM_CAPACITY].fill(0);
         debug!(slot, "worker slot freed");
-    }}
-impl SyncShm {
-    // ── construction ─────────────────────────────────────────────────
+    }
+
+    /// Read all worker slots as snapshots.
+    pub fn read_worker_slots(&self) -> Vec<crate::worker::WorkerSlotSnapshot> {
+        use crate::worker::{WorkerSlotSnapshot, WorkerState};
+
+        let wreg = self.worker_registry();
+        let mut slots = Vec::new();
+
+        for i in 0..MAX_WORKERS {
+            let ws = &wreg.slots[i];
+            let state_raw = ws.state.get();
+
+            if state_raw == 0 {
+                continue; // Free slot
+            }
+
+            let id_len = (ws.chat_id_len.get() as usize).min(WORKER_CHAT_ID_MAX);
+            let chat_id = String::from_utf8_lossy(&ws.chat_id[..id_len]).to_string();
+
+            // output_len and sequence need atomic reads for cross-process visibility.
+            let buf = self.mmap.as_ref();
+            let slot_base = WORKER_REGISTRY_OFFSET + i * WORKER_SLOT_SIZE;
+            let output_len = read_u64_acquire(buf, slot_base + 104);
+            let sequence = read_u64_acquire(buf, slot_base + 112);
+
+            slots.push(WorkerSlotSnapshot {
+                slot_index: i,
+                worker_pid: ws.worker_pid.get(),
+                parent_pid: ws.parent_pid.get(),
+                provider: ws.provider.get(),
+                state: WorkerState::from_u32(state_raw),
+                chat_id,
+                started_at: ws.started_at.get(),
+                updated_at: ws.updated_at.get(),
+                output_len,
+                sequence,
+            });
+        }
+
+        slots
+    }
+
+    // ── private helpers ──────────────────────────────────────────────
 
     fn migrate_to_current(&mut self) {
         let ver = self.header().version.get();
@@ -330,9 +382,7 @@ impl SyncShm {
             buf[292..304].fill(0);
             self.header_mut().version.set(VERSION);
         }
-    }}
-impl SyncShm {
-    // ── construction ─────────────────────────────────────────────────
+    }
 
     pub(super) fn ensure_initialized(&mut self) {
         if self.header().magic.get() != MAGIC {
@@ -346,10 +396,13 @@ impl SyncShm {
             // Existing region — check for version migration.
             self.migrate_to_current();
         }
-    }}
+    }
+}
+
 fn registry_lock_path() -> PathBuf {
     crate::config::shared_infra_dir().join("sync-registry.lock")
 }
+
 fn open_registry_lock_file() -> anyhow::Result<std::fs::File> {
     let path = registry_lock_path();
     if let Some(parent) = path.parent() {
@@ -362,6 +415,7 @@ fn open_registry_lock_file() -> anyhow::Result<std::fs::File> {
         .open(&path)
         .map_err(Into::into)
 }
+
 #[cfg(target_os = "linux")]
 fn current_process_identity_token(pid: u32) -> Option<u64> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
@@ -370,6 +424,7 @@ fn current_process_identity_token(pid: u32) -> Option<u64> {
     let field = rest.split_whitespace().nth(19)?;
     field.parse().ok()
 }
+
 #[cfg(not(target_os = "linux"))]
 fn current_process_identity_token(pid: u32) -> Option<u64> {
     if is_pid_alive(pid) {
@@ -378,6 +433,7 @@ fn current_process_identity_token(pid: u32) -> Option<u64> {
         None
     }
 }
+
 fn process_identity_matches(pid: u32, identity_token: u64) -> bool {
     if pid == 0 || !is_pid_alive(pid) {
         return false;
@@ -387,6 +443,7 @@ fn process_identity_matches(pid: u32, identity_token: u64) -> bool {
         None => false,
     }
 }
+
 impl Drop for SyncShm {
     fn drop(&mut self) {
         if self.registered {
@@ -395,6 +452,9 @@ impl Drop for SyncShm {
         info!(pid = self.our_pid, "sync shm dropped");
     }
 }
+
+// ── platform-specific shm open ──────────────────────────────────────
+
 /// Return the platform-specific path to the shared memory file.
 pub fn shm_path() -> PathBuf {
     #[cfg(target_os = "linux")]
@@ -407,6 +467,7 @@ pub fn shm_path() -> PathBuf {
         std::env::temp_dir().join(SHM_NAME)
     }
 }
+
 #[cfg(target_os = "linux")]
 fn open_or_create_shm() -> anyhow::Result<(MmapMut, PathBuf)> {
     let path = shm_path();
@@ -414,10 +475,12 @@ fn open_or_create_shm() -> anyhow::Result<(MmapMut, PathBuf)> {
     info!(path=%path.display(), "sync: opened linux shm");
     Ok((mmap, path))
 }
+
 #[cfg(target_os = "linux")]
 fn open_existing_shm() -> anyhow::Result<(MmapMut, PathBuf)> {
     open_file_backed_shm(shm_path(), false, false)
 }
+
 #[cfg(target_os = "macos")]
 fn open_or_create_shm() -> anyhow::Result<(MmapMut, PathBuf)> {
     use std::ffi::CString;
@@ -441,6 +504,7 @@ fn open_or_create_shm() -> anyhow::Result<(MmapMut, PathBuf)> {
     info!("sync: opened macos shm via shm_open");
     Ok((mmap, path))
 }
+
 #[cfg(target_os = "macos")]
 fn open_existing_shm() -> anyhow::Result<(MmapMut, PathBuf)> {
     use std::ffi::CString;
@@ -462,6 +526,7 @@ fn open_existing_shm() -> anyhow::Result<(MmapMut, PathBuf)> {
     let mmap = map_shm_file(&file)?;
     Ok((mmap, path))
 }
+
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn open_or_create_shm() -> anyhow::Result<(MmapMut, PathBuf)> {
     // Fallback: use a regular file in the user's temp directory.
@@ -470,10 +535,12 @@ fn open_or_create_shm() -> anyhow::Result<(MmapMut, PathBuf)> {
     warn!(path=%path.display(), "sync: using file-backed fallback shm");
     Ok((mmap, path))
 }
+
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn open_existing_shm() -> anyhow::Result<(MmapMut, PathBuf)> {
     open_file_backed_shm(std::env::temp_dir().join(SHM_NAME), false, false)
 }
+
 pub(super) fn prepare_shm_file(
     file: &std::fs::File,
     path: &std::path::Path,
@@ -494,9 +561,11 @@ pub(super) fn prepare_shm_file(
         path.display()
     ))
 }
+
 fn map_shm_file(file: &std::fs::File) -> anyhow::Result<MmapMut> {
     Ok(unsafe { MmapMut::map_mut(file)? })
 }
+
 pub(super) fn open_file_backed_shm(
     path: PathBuf,
     create: bool,
@@ -514,14 +583,17 @@ pub(super) fn open_file_backed_shm(
     let mmap = map_shm_file(&file)?;
     Ok((mmap, path))
 }
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(not(test), allow(dead_code))]
 pub(super) struct RemoteStateEntry {
     pub(super) version: u64,
     pub(super) contents: String,
 }
+
 #[cfg_attr(not(test), allow(dead_code))]
 type RemoteState = BTreeMap<String, RemoteStateEntry>;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(not(test), allow(dead_code))]
 pub(super) struct SyncConflict {
@@ -529,12 +601,14 @@ pub(super) struct SyncConflict {
     pub(super) local: Option<String>,
     pub(super) remote: Option<String>,
 }
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(not(test), allow(dead_code))]
 pub(super) enum WorkspacePatch {
     Write { path: PathBuf, contents: String },
     Delete { path: PathBuf },
 }
+
 #[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn merge_remote_state(current: &RemoteState, incoming: &RemoteState) -> RemoteState {
     let mut merged = current.clone();
@@ -549,6 +623,7 @@ pub(super) fn merge_remote_state(current: &RemoteState, incoming: &RemoteState) 
     }
     merged
 }
+
 #[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn detect_conflicts(
     base: &RemoteState,
@@ -583,6 +658,7 @@ pub(super) fn detect_conflicts(
         })
         .collect()
 }
+
 #[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn apply_patch(workspace_root: &Path, patch: &[WorkspacePatch]) -> anyhow::Result<()> {
     for change in patch {
@@ -590,6 +666,7 @@ pub(super) fn apply_patch(workspace_root: &Path, patch: &[WorkspacePatch]) -> an
     }
     Ok(())
 }
+
 #[cfg_attr(not(test), allow(dead_code))]
 fn apply_patch_change(workspace_root: &Path, change: &WorkspacePatch) -> anyhow::Result<()> {
     let path = workspace_root.join(change.relative_path());
@@ -608,6 +685,7 @@ fn apply_patch_change(workspace_root: &Path, change: &WorkspacePatch) -> anyhow:
     }
     Ok(())
 }
+
 #[cfg_attr(not(test), allow(dead_code))]
 impl WorkspacePatch {
     fn relative_path(&self) -> &Path {
