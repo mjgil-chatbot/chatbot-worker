@@ -8,13 +8,17 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
 use crate::config;
 use crate::memory::MemoryContext;
 use crate::summary::JsonSummary;
+
 pub const WORKER_SPOOL_SCHEMA_VERSION: u32 = 1;
+
 fn default_worker_spool_schema_version() -> u32 {
     WORKER_SPOOL_SCHEMA_VERSION
 }
+
 fn validate_worker_spool_schema_version(version: u32, artifact: &str) -> Result<()> {
     if version == WORKER_SPOOL_SCHEMA_VERSION {
         return Ok(());
@@ -27,6 +31,7 @@ fn validate_worker_spool_schema_version(version: u32, artifact: &str) -> Result<
         WORKER_SPOOL_SCHEMA_VERSION,
     );
 }
+
 /// Request written by the UI before spawning a worker.
 #[derive(Debug, Clone)]
 pub struct WorkerRequest {
@@ -43,6 +48,7 @@ pub struct WorkerRequest {
     pub command: String,
     pub chat_id: String,
 }
+
 /// Result written by the worker on completion.
 #[derive(Debug, Clone)]
 pub struct WorkerResult {
@@ -50,6 +56,7 @@ pub struct WorkerResult {
     pub summary: Option<JsonSummary>,
     pub error: Option<String>,
 }
+
 /// Worker state in the mmap registry.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
@@ -60,6 +67,7 @@ pub enum WorkerState {
     Stopped = 3,
     Error = 4,
 }
+
 impl WorkerState {
     pub fn name(&self) -> &'static str {
         match self {
@@ -69,8 +77,8 @@ impl WorkerState {
             Self::Stopped => "STOPPED",
             Self::Error => "ERROR",
         }
-    }}
-impl WorkerState {
+    }
+
     pub fn from_u32(v: u32) -> Self {
         match v {
             1 => Self::Running,
@@ -79,7 +87,9 @@ impl WorkerState {
             4 => Self::Error,
             _ => Self::Free,
         }
-    }}
+    }
+}
+
 /// Snapshot of a worker slot read from the mmap.
 #[derive(Debug, Clone)]
 pub struct WorkerSlotSnapshot {
@@ -94,6 +104,7 @@ pub struct WorkerSlotSnapshot {
     pub output_len: u64,
     pub sequence: u64,
 }
+
 /// Durable job state written into the worker spool directory.
 #[derive(Debug, Clone)]
 pub struct WorkerJobSnapshot {
@@ -107,6 +118,7 @@ pub struct WorkerJobSnapshot {
     pub output_len: u64,
     pub sequence: u64,
 }
+
 #[derive(Serialize, Deserialize)]
 struct WorkerRequestSerde {
     #[serde(default = "default_worker_spool_schema_version")]
@@ -132,6 +144,7 @@ struct WorkerRequestSerde {
     command: String,
     chat_id: String,
 }
+
 #[derive(Serialize)]
 struct WorkerRequestSerialize<'a> {
     schema_version: u32,
@@ -156,6 +169,7 @@ struct WorkerRequestSerialize<'a> {
     command: &'a str,
     chat_id: &'a str,
 }
+
 #[derive(Serialize, Deserialize)]
 struct WorkerResultSerde {
     #[serde(default = "default_worker_spool_schema_version")]
@@ -167,6 +181,7 @@ struct WorkerResultSerde {
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
+
 #[derive(Serialize)]
 struct WorkerResultSerialize<'a> {
     schema_version: u32,
@@ -177,6 +192,7 @@ struct WorkerResultSerialize<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<&'a String>,
 }
+
 #[derive(Serialize, Deserialize)]
 struct WorkerJobSnapshotSerde {
     #[serde(default = "default_worker_spool_schema_version")]
@@ -191,6 +207,7 @@ struct WorkerJobSnapshotSerde {
     output_len: u64,
     sequence: u64,
 }
+
 #[derive(Serialize)]
 struct WorkerJobSnapshotSerialize<'a> {
     schema_version: u32,
@@ -204,6 +221,7 @@ struct WorkerJobSnapshotSerialize<'a> {
     output_len: u64,
     sequence: u64,
 }
+
 impl Serialize for WorkerRequest {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
@@ -227,6 +245,7 @@ impl Serialize for WorkerRequest {
         .serialize(serializer)
     }
 }
+
 impl<'de> Deserialize<'de> for WorkerRequest {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
@@ -251,6 +270,7 @@ impl<'de> Deserialize<'de> for WorkerRequest {
         })
     }
 }
+
 impl Serialize for WorkerResult {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
@@ -265,6 +285,7 @@ impl Serialize for WorkerResult {
         .serialize(serializer)
     }
 }
+
 impl<'de> Deserialize<'de> for WorkerResult {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
@@ -280,6 +301,7 @@ impl<'de> Deserialize<'de> for WorkerResult {
         })
     }
 }
+
 impl Serialize for WorkerJobSnapshot {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
@@ -300,6 +322,7 @@ impl Serialize for WorkerJobSnapshot {
         .serialize(serializer)
     }
 }
+
 impl<'de> Deserialize<'de> for WorkerJobSnapshot {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
@@ -321,6 +344,7 @@ impl<'de> Deserialize<'de> for WorkerJobSnapshot {
         })
     }
 }
+
 impl WorkerJobSnapshot {
     pub fn new(chat_id: &str, provider: &str, worker_pid: u32, parent_pid: u32) -> Self {
         let now = Utc::now().timestamp();
@@ -335,16 +359,21 @@ impl WorkerJobSnapshot {
             output_len: 0,
             sequence: 1,
         }
-    }}
-impl WorkerJobSnapshot {
+    }
+
     pub fn bump(&mut self) {
         self.sequence = self.sequence.saturating_add(1);
         self.updated_at = Utc::now().timestamp();
-    }}
+    }
+}
+
+// ── path helpers ────────────────────────────────────────────────────
+
 /// Root directory for all worker data.
 pub fn workers_dir() -> PathBuf {
     config::shared_infra_dir().join("workers")
 }
+
 /// Validate chat_id to prevent path traversal attacks.
 /// Returns the chat_id if valid, otherwise None.
 fn validate_chat_id(chat_id: &str) -> Option<&str> {
@@ -362,6 +391,7 @@ fn validate_chat_id(chat_id: &str) -> Option<&str> {
     }
     Some(chat_id)
 }
+
 fn safe_chat_id_component(chat_id: &str) -> Cow<'_, str> {
     if let Some(valid) = validate_chat_id(chat_id) {
         return Cow::Borrowed(valid);
@@ -375,47 +405,59 @@ fn safe_chat_id_component(chat_id: &str) -> Cow<'_, str> {
     }
     Cow::Owned(encoded)
 }
+
 /// Directory for a specific worker (by chat_id).
 pub fn worker_dir(chat_id: &str) -> PathBuf {
     workers_dir().join(safe_chat_id_component(chat_id).as_ref())
 }
+
 /// Path to the request.json file for a worker.
 pub fn request_path(chat_id: &str) -> PathBuf {
     worker_dir(chat_id).join("request.json")
 }
+
 /// Path to the output file for a worker.
 pub fn output_path(chat_id: &str) -> PathBuf {
     worker_dir(chat_id).join("output")
 }
+
 /// Path to the result.json file for a worker.
 pub fn result_path(chat_id: &str) -> PathBuf {
     worker_dir(chat_id).join("result.json")
 }
+
 /// Path to the state.json file for a worker/job spool entry.
 pub fn state_path(chat_id: &str) -> PathBuf {
     worker_dir(chat_id).join("state.json")
 }
+
 /// Path to the JSONL event log for a worker.
 pub fn events_path(chat_id: &str) -> PathBuf {
     worker_dir(chat_id).join("events.jsonl")
 }
+
 /// Path to captured raw adapter event JSONL for a worker.
 pub fn raw_adapter_events_path(chat_id: &str) -> PathBuf {
     worker_dir(chat_id).join("adapter-events.raw.jsonl")
 }
+
 /// Path to captured raw provider event JSONL for a worker.
 pub fn raw_provider_events_path(chat_id: &str) -> PathBuf {
     worker_dir(chat_id).join("provider-events.raw.jsonl")
 }
+
 /// Path to captured git verifier context for a worker.
 pub fn git_verifier_context_path(chat_id: &str) -> PathBuf {
     worker_dir(chat_id).join("git-verifier-context.json")
 }
+
 /// Path to per-run transport retry diagnostics for a worker.
 pub fn transport_errors_path(chat_id: &str) -> PathBuf {
     worker_dir(chat_id).join("transport-errors.log")
 }
+
 const MISSING_STATE_STARTUP_GRACE: Duration = Duration::from_secs(5);
+
 /// Read the current spool state for one worker.
 pub fn read_job_state(chat_id: &str) -> Result<Option<WorkerJobSnapshot>> {
     let path = state_path(chat_id);
@@ -428,6 +470,7 @@ pub fn read_job_state(chat_id: &str) -> Result<Option<WorkerJobSnapshot>> {
         .with_context(|| format!("failed to parse {}", path.display()))?;
     Ok(Some(job))
 }
+
 /// List all spool states currently present on disk.
 pub fn list_job_states() -> Result<Vec<WorkerJobSnapshot>> {
     let mut jobs = Vec::new();
@@ -469,6 +512,7 @@ pub fn list_job_states() -> Result<Vec<WorkerJobSnapshot>> {
 
     Ok(jobs)
 }
+
 fn missing_state_spool_is_transient(chat_id: &str) -> bool {
     [request_path(chat_id), worker_dir(chat_id)]
         .into_iter()
@@ -477,6 +521,7 @@ fn missing_state_spool_is_transient(chat_id: &str) -> bool {
         .filter_map(|modified| modified.elapsed().ok())
         .any(|elapsed| elapsed <= MISSING_STATE_STARTUP_GRACE)
 }
+
 fn cleanup_missing_state_spool_entry(chat_id: &str) {
     let dir = worker_dir(chat_id);
     match fs::remove_dir_all(&dir) {
@@ -498,6 +543,7 @@ fn cleanup_missing_state_spool_entry(chat_id: &str) {
         }
     }
 }
+
 /// Read the worker's latest accumulated output from the spool.
 ///
 /// Prefers the flat `output` file for backward compatibility.  When it is
@@ -515,6 +561,7 @@ pub fn read_output(chat_id: &str) -> String {
     }
     crate::stream::compute_output_from_events(&events)
 }
+
 /// Read new streaming events since a byte offset.
 ///
 /// Returns `(new_events, new_offset)`.  The caller should persist the
@@ -522,6 +569,7 @@ pub fn read_output(chat_id: &str) -> String {
 pub fn read_events_since(chat_id: &str, offset: u64) -> (Vec<crate::stream::StreamEvent>, u64) {
     crate::stream::read_events_since(&events_path(chat_id), offset)
 }
+
 /// Remove transient spool artifacts from a previous run while keeping the
 /// current request intact.
 pub fn clear_transient_spool_files(chat_id: &str) -> Result<()> {
@@ -546,16 +594,19 @@ pub fn clear_transient_spool_files(chat_id: &str) -> Result<()> {
 
     Ok(())
 }
+
 /// Atomically write text content inside the worker spool directory.
 pub fn write_text_atomic(path: &Path, content: &str) -> io::Result<()> {
     write_bytes_atomic(path, content.as_bytes())
 }
+
 /// Atomically write JSON content inside the worker spool directory.
 pub fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let json = serde_json::to_string_pretty(value)?;
     write_bytes_atomic(path, json.as_bytes())?;
     Ok(())
 }
+
 fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = path
         .parent()
@@ -572,3 +623,6 @@ fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     fs::rename(&tmp_path, path)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;
