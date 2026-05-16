@@ -9,8 +9,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::{mpsc, Arc};
+use crate::chatbot_worker_trace as trace;
 use crate::model::ModelProvider;
-use crate::worker::WorkerRequest;
+use crate::worker::{self, WorkerJobSnapshot, WorkerRequest, WorkerResult, WorkerState};
 use crate::worker_ext;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -92,6 +93,68 @@ fn parse_worker_extension_request(
     let parsed =
         serde_json::from_str(&request.query).context("failed to parse worker extension request")?;
     Ok(Some(parsed))
+}
+fn complete_worker_request(
+    chat_id: &str,
+    output_path: &Path,
+    result_path: &Path,
+    job: &mut WorkerJobSnapshot,
+    state: WorkerState,
+    output: &str,
+    error: Option<String>,
+) -> Result<()> {
+    trace::complete_request(chat_id, state, output.len(), error.is_some());
+    worker::write_text_atomic(output_path, output)
+        .with_context(|| format!("failed to write {}", output_path.display()))?;
+    trace::output_persisted(
+        chat_id,
+        output_path,
+        output.len(),
+        "complete_worker_request",
+    );
+    persist_terminal_result(
+        result_path,
+        job,
+        state,
+        WorkerResult {
+            session_id: None,
+            summary: None,
+            error,
+        },
+    )?;
+    job.output_len = output.len() as u64;
+    job.bump();
+    trace::state_write(chat_id, job, "complete_worker_request");
+    worker::write_json_atomic(&worker::state_path(chat_id), job)
+}
+fn write_result(path: &std::path::Path, result: &WorkerResult) -> anyhow::Result<()> {
+    worker::write_json_atomic(path, result)
+}
+pub(crate) fn persist_terminal_result(
+    result_path: &std::path::Path,
+    job: &mut WorkerJobSnapshot,
+    desired_state: WorkerState,
+    result: WorkerResult,
+) -> anyhow::Result<()> {
+    trace::terminal_result_attempt(&job.chat_id, result_path, desired_state, &result);
+    match write_result(result_path, &result) {
+        Ok(()) => {
+            job.state = desired_state;
+            trace::terminal_result_ok(&job.chat_id, job.state);
+        }
+        Err(err) => {
+            trace::terminal_result_fallback(&job.chat_id, &err);
+            let fallback = WorkerResult {
+                session_id: None,
+                summary: None,
+                error: Some(format!("Failed to persist terminal result payload: {err}")),
+            };
+            write_result(result_path, &fallback)?;
+            job.state = WorkerState::Error;
+            trace::terminal_result_fallback_ok(&job.chat_id, job.state);
+        }
+    }
+    Ok(())
 }
 #[cfg(test)]
 mod tests;
