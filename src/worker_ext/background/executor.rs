@@ -1,8 +1,14 @@
 pub(super) use super::failure::provider_failure_message;
 #[cfg(test)]
 pub(super) use super::failure::{classify_provider_output, is_provider_failure};
+use super::session_ids::{
+    has_resume as provider_has_resume, resume_session_id as provider_resume_session_id,
+};
 use super::types::*;
 use crate::config;
+use crate::data::ChatSession;
+use crate::model::ModelProvider;
+use crate::summary::JsonSummary;
 use ai_providers::claude::cli::{effective_claude_system_prompt, get_subscription_type};
 #[cfg(test)]
 use ai_providers::config::QwenCodeCliConfig;
@@ -16,6 +22,46 @@ use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+#[cfg(test)]
+#[path = "executor/qwen_command.rs"]
+mod qwen_command;
+#[cfg(test)]
+pub(crate) use qwen_command::build_qwen_command;
+pub(super) fn build_background_session(
+    task: &BackgroundTask,
+    provider: ModelProvider,
+) -> ChatSession {
+    let mut session = ChatSession {
+        id: task.id.to_string(),
+        name: task.agent_profile.role.clone(),
+        system_prompt: task.system_prompt.clone(),
+        json_summary: None::<JsonSummary>,
+        claude_session_id: None,
+        minimax_session_id: None,
+        qwen_session_id: None,
+        codex_session_id: None,
+        nvidia_session_id: None,
+        gemini_session_id: None,
+        openrouter_session_id: None,
+        omniforge_session_id: None,
+        omniforge_model_id: None,
+        kimi_session_id: None,
+        opencode_session_id: None,
+        hermes_session_id: None,
+        forge_session_id: None,
+        claw_session_id: None,
+        launched_from: task.working_dir.clone(),
+        runsc_dirs: Vec::new(),
+        runsc_image: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        messages: vec![],
+    };
+    if let Some(session_id) = task.resume_session_id.as_ref() {
+        provider.set_session_id_on_chat(&mut session, session_id.clone());
+    }
+    session
+}
 pub(super) fn validate_claude_config(config: &ClaudeCliConfig) -> Result<(), String> {
     if !config.allow_api_billing {
         let subscription_type = get_subscription_type(config);
@@ -112,6 +158,89 @@ pub(super) fn build_claude_command(
     );
     command
 }
+pub(super) fn build_codex_command(
+    provider: ModelProvider,
+    task: &BackgroundTask,
+    provider_session: Option<&ProviderSession>,
+    config: &CodexCliConfig,
+) -> std::process::Command {
+    let mut command = std::process::Command::new(&config.cli);
+    crate::provider_bridge::apply_cli_runtime_env(&mut command, &config.cli);
+    workspace::apply_session_working_dir(&mut command, provider_session);
+    let working_dir = provider_session.and_then(|session| session.working_dir.as_deref());
+    let runsc_enabled = config
+        .runsc_image
+        .as_deref()
+        .is_some_and(|image| !image.trim().is_empty());
+    for (key, value) in &config.extra_env {
+        command.env(key, value);
+    }
+    command.arg("exec");
+    if let Some(mode) = config.sandbox_mode.as_deref() {
+        command.arg("--sandbox").arg(mode);
+    }
+    if let Some(effort) = config.reasoning_effort.as_deref() {
+        command
+            .arg("-c")
+            .arg(format!("reasoning_effort=\"{}\"", effort));
+    }
+    if config.json_stream {
+        command.arg("--json");
+    }
+    if let Some(model) = config.model.as_deref() {
+        command.arg("--model").arg(model);
+    }
+    if let Some(schema_path) = config.output_schema.as_ref() {
+        command.arg("--output-schema").arg(schema_path);
+    }
+    command.arg("--skip-git-repo-check");
+    if let Some(session_id) = provider_resume_session_id(provider, provider_session) {
+        command.arg("resume").arg(session_id);
+    }
+    let prompt = build_codex_prompt(task, runsc_enabled, working_dir);
+    if ai_providers::config::prompt_needs_hyphen_guard(&prompt) {
+        command.arg("--");
+    }
+    command.arg(prompt);
+    command
+}
+pub(super) fn build_gemini_command(
+    task: &BackgroundTask,
+    provider_session: Option<&ProviderSession>,
+    config: &GeminiCliConfig,
+) -> std::process::Command {
+    let mut command = std::process::Command::new(&config.cli);
+    crate::provider_bridge::apply_cli_runtime_env(&mut command, &config.cli);
+    workspace::apply_session_working_dir(&mut command, provider_session);
+    let working_dir = provider_session.and_then(|session| session.working_dir.as_deref());
+    let runsc_enabled = config
+        .runsc_image
+        .as_deref()
+        .is_some_and(|image| !image.trim().is_empty());
+    command.arg("--output-format").arg(&config.output_format);
+    for directory in gemini_include_directories(provider_session, config) {
+        command.arg("--include-directories").arg(directory);
+    }
+    if let Some(model) = config.model.as_deref() {
+        command.arg("--model").arg(model);
+    }
+    if let Some(mode) = config.approval_mode.as_deref() {
+        command.arg("--approval-mode").arg(mode);
+    }
+    if let Some(session_id) = provider_resume_session_id(ModelProvider::Gemini, provider_session) {
+        command.arg("--resume").arg(session_id);
+    }
+    add_prompt_arg(
+        &mut command,
+        &build_gemini_prompt(task, provider_session, runsc_enabled, working_dir),
+    );
+    if let Some(path) = config.project_settings_path.as_ref() {
+        if path.is_file() {
+            command.env("GEMINI_CLI_PROJECT_SETTINGS_PATH", path);
+        }
+    }
+    command
+}
 pub(super) fn build_codex_prompt(
     task: &BackgroundTask,
     runsc_enabled: bool,
@@ -130,6 +259,40 @@ pub(super) fn build_codex_prompt(
         }
         _ => rewrite_runsc_workspace_paths(&task.prompt, runsc_enabled, working_dir),
     }
+}
+pub(super) fn build_gemini_prompt(
+    task: &BackgroundTask,
+    provider_session: Option<&ProviderSession>,
+    runsc_enabled: bool,
+    working_dir: Option<&str>,
+) -> String {
+    let mut sections = Vec::new();
+    let has_resume = provider_has_resume(ModelProvider::Gemini, provider_session);
+
+    if !has_resume {
+        if let Some(prompt) = task.system_prompt.as_deref() {
+            if !prompt.trim().is_empty() {
+                sections.push(format!(
+                    "System instructions:\n{}",
+                    rewrite_runsc_workspace_paths(prompt, runsc_enabled, working_dir)
+                ));
+            }
+        }
+    }
+
+    if task.prompt.contains('\n') {
+        sections.push(format!(
+            "User:\n{}",
+            rewrite_runsc_workspace_paths(&task.prompt, runsc_enabled, working_dir).trim()
+        ));
+    } else {
+        sections.push(format!(
+            "User: {}",
+            rewrite_runsc_workspace_paths(&task.prompt, runsc_enabled, working_dir).trim()
+        ));
+    }
+
+    sections.join("\n\n")
 }
 pub(super) fn rewrite_runsc_workspace_paths(
     text: &str,
