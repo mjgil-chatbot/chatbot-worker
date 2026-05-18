@@ -5,8 +5,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
-use crate::data::SessionInfo;
-use crate::data::SessionMetadata;
+use crate::data::{ChatSession, SessionInfo, SessionMetadata};
 const SCHEMA_VERSION: i64 = 2;
 const INDEX_DIR_NAME: &str = ".rust-chatbot";
 const INDEX_FILE_NAME: &str = "index.db";
@@ -328,6 +327,20 @@ pub fn search_sessions_fts(conn: &Connection, query: &str) -> Result<Vec<String>
     }
     Ok(ids)
 }
+pub fn session_fts_content(session: &ChatSession) -> String {
+    let mut out = String::new();
+    append_fts_chunk(&mut out, &session.name);
+    if let Some(system_prompt) = session.system_prompt.as_ref() {
+        append_fts_chunk(&mut out, system_prompt);
+    }
+    for message in &session.messages {
+        append_fts_chunk(&mut out, &message.content);
+        if let Some(command) = message.command.as_ref() {
+            append_fts_chunk(&mut out, command);
+        }
+    }
+    out
+}
 fn append_fts_chunk(out: &mut String, chunk: &str) {
     if chunk.is_empty() {
         return;
@@ -336,6 +349,9 @@ fn append_fts_chunk(out: &mut String, chunk: &str) {
         out.push('\n');
     }
     out.push_str(chunk);
+}
+pub fn session_fingerprint_i64(session: &ChatSession) -> i64 {
+    session.history_fingerprint() as i64
 }
 fn configure_connection(conn: &Connection) -> Result<()> {
     conn.pragma_update(None, "journal_mode", "WAL")?;

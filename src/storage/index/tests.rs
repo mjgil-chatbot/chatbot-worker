@@ -4,6 +4,59 @@ use rusqlite::Connection;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::Path;
+fn write_session_fixture(root: &Path, session_id: &str, hidden: bool) -> Result<()> {
+    let sessions_dir = root.join("sessions");
+    fs::create_dir_all(&sessions_dir)?;
+    let now = Utc::now();
+    let session = ChatSession {
+        id: session_id.to_string(),
+        name: "Hidden Session".to_string(),
+        system_prompt: None,
+        json_summary: None,
+        claude_session_id: None,
+        minimax_session_id: None,
+        qwen_session_id: None,
+        codex_session_id: None,
+        nvidia_session_id: None,
+        gemini_session_id: None,
+        openrouter_session_id: None,
+        omniforge_session_id: None,
+        omniforge_model_id: None,
+        kimi_session_id: None,
+        opencode_session_id: None,
+        hermes_session_id: None,
+        forge_session_id: None,
+        claw_session_id: None,
+        launched_from: None,
+        runsc_dirs: Vec::new(),
+        runsc_image: None,
+        created_at: now,
+        updated_at: now,
+        messages: vec![],
+    };
+    fs::write(
+        sessions_dir.join(format!("{session_id}.json")),
+        serde_json::to_string_pretty(&session)?,
+    )?;
+
+    let mut sessions = HashMap::new();
+    sessions.insert(
+        session_id.to_string(),
+        SessionInfo {
+            id: session_id.to_string(),
+            name: session.name.clone(),
+            created_at: now,
+            updated_at: now,
+            message_count: 0,
+            hidden,
+        },
+    );
+    fs::write(
+        root.join("sessions.json"),
+        serde_json::to_string_pretty(&SessionMetadata { sessions })?,
+    )?;
+    Ok(())
+}
 struct HomeGuard {
     previous: Option<OsString>,
 }
