@@ -12,6 +12,29 @@ fn uses_agent_adapter(provider: ModelProvider) -> bool {
             | ModelProvider::Claw
     )
 }
+fn adapter_sandbox_dirs(session: Option<&ChatSession>) -> Vec<String> {
+    let mut dirs = Vec::new();
+
+    if let Some(working_dir) = session
+        .and_then(|session| session.launched_from.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        dirs.push(working_dir.to_string());
+    }
+
+    if let Some(session) = session {
+        for dir in &session.runsc_dirs {
+            let dir = dir.trim();
+            if dir.is_empty() || dirs.iter().any(|existing| existing == dir) {
+                continue;
+            }
+            dirs.push(dir.to_string());
+        }
+    }
+
+    dirs
+}
 fn agent_adapter_cli_program() -> String {
     crate::companion_binary::resolve_agent_adapter_cli()
         .to_string_lossy()

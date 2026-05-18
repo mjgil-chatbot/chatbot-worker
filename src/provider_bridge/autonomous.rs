@@ -1,3 +1,9 @@
+pub fn sync_provider_mcp_configs(
+    session: Option<&ChatSession>,
+    overrides: Option<&ProviderRequestOverrides>,
+) -> Result<()> {
+    sync_mcp_configs(session, overrides)
+}
 fn background_execution_environment_from_env() -> AutonomousExecutionEnvironment {
     let value = std::env::var("RUST_CHATBOT_BACKGROUND_EXECUTION_ENV")
         .ok()

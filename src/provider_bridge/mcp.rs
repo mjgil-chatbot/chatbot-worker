@@ -60,9 +60,11 @@ fn write_file_atomically(path: &Path, contents: &[u8]) -> Result<()> {
         path.display()
     );
 }
+
 fn toml_basic_string(value: &str) -> Result<String> {
     serde_json::to_string(value).map_err(Into::into)
 }
+
 fn resolved_mcp_json_path(overrides: Option<&ProviderRequestOverrides>) -> PathBuf {
     path_override(
         overrides.and_then(|overrides| overrides.mcp_json_path.as_ref()),
@@ -71,6 +73,7 @@ fn resolved_mcp_json_path(overrides: Option<&ProviderRequestOverrides>) -> PathB
     )
     .unwrap_or_else(|| PathBuf::from(config::mcp_json_path()))
 }
+
 fn resolved_claude_json_path(overrides: Option<&ProviderRequestOverrides>) -> Option<PathBuf> {
     path_override(
         overrides.and_then(|overrides| overrides.claude_json_path.as_ref()),
@@ -78,6 +81,7 @@ fn resolved_claude_json_path(overrides: Option<&ProviderRequestOverrides>) -> Op
         || config::claude_json_path().map(PathBuf::from),
     )
 }
+
 fn resolved_minimax_compat_json_paths(
     overrides: Option<&ProviderRequestOverrides>,
 ) -> Vec<PathBuf> {
@@ -103,6 +107,19 @@ fn resolved_minimax_compat_json_paths(
 
     paths
 }
+
+fn gemini_settings_source_path(
+    session: Option<&ChatSession>,
+    overrides: Option<&ProviderRequestOverrides>,
+) -> PathBuf {
+    path_override(
+        overrides.and_then(|overrides| overrides.gemini_settings_path.as_ref()),
+        TEST_GEMINI_SETTINGS_PATH_ENV,
+        || Some(workspace::gemini_project_settings_path(session)),
+    )
+    .unwrap_or_else(|| workspace::gemini_project_settings_path(session))
+}
+
 fn gemini_runsc_settings_sidecar_path(source: &Path) -> PathBuf {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     std::hash::Hash::hash(&source.to_string_lossy(), &mut hasher);
@@ -111,6 +128,19 @@ fn gemini_runsc_settings_sidecar_path(source: &Path) -> PathBuf {
         .join("provider-bridge-gemini-settings")
         .join(format!("{source_hash:016x}.json"))
 }
+
+fn resolved_gemini_settings_path(
+    session: Option<&ChatSession>,
+    overrides: Option<&ProviderRequestOverrides>,
+) -> PathBuf {
+    let source = gemini_settings_source_path(session, overrides);
+    if runsc_mcp_restrictions_enabled(overrides) {
+        gemini_runsc_settings_sidecar_path(&source)
+    } else {
+        source
+    }
+}
+
 fn resolved_codex_toml_path(overrides: Option<&ProviderRequestOverrides>) -> PathBuf {
     path_override(
         overrides.and_then(|overrides| overrides.codex_toml_path.as_ref()),
@@ -119,6 +149,7 @@ fn resolved_codex_toml_path(overrides: Option<&ProviderRequestOverrides>) -> Pat
     )
     .unwrap_or_else(|| PathBuf::from(config::codex_toml_path()))
 }
+
 fn resolved_codex_toml_paths(overrides: Option<&ProviderRequestOverrides>) -> Vec<PathBuf> {
     let primary = resolved_codex_toml_path(overrides);
     if overrides.is_some_and(|o| o.codex_toml_path.is_some()) {
@@ -134,10 +165,12 @@ fn resolved_codex_toml_paths(overrides: Option<&ProviderRequestOverrides>) -> Ve
     }
     paths
 }
+
 const MCP_COORDINATOR_SERVER_NAME: &str = "mcp-coordinator";
 const MCP_PROVIDER_PROFILE_CLAUDE: &str = "claude";
 const MCP_PROVIDER_PROFILE_CODEX: &str = "codex";
 const MCP_PROVIDER_PROFILE_GEMINI: &str = "gemini";
+
 fn provider_mcp_profile(provider: ModelProvider) -> Option<&'static str> {
     match provider {
         ModelProvider::Claude | ModelProvider::MiniMax | ModelProvider::MiniMaxForge => {
@@ -153,11 +186,13 @@ fn provider_mcp_profile(provider: ModelProvider) -> Option<&'static str> {
         _ => None,
     }
 }
+
 fn load_mcp_json_value(path: &Path) -> Option<serde_json::Value> {
     std::fs::read(path)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
 }
+
 fn configured_mcp_servers<'a>(
     parsed: &'a serde_json::Value,
     provider_profile: Option<&str>,
@@ -174,18 +209,21 @@ fn configured_mcp_servers<'a>(
         })
         .or_else(|| parsed.get("mcpServers").and_then(|value| value.as_object()))
 }
+
 fn resolve_binary_on_path(binary: &str) -> Option<PathBuf> {
     let paths = std::env::var_os("PATH")?;
     std::env::split_paths(&paths)
         .map(|dir| dir.join(binary))
         .find(|candidate| candidate.is_file())
 }
+
 fn implicit_fff_server_spec() -> Option<serde_json::Value> {
     let command = resolve_binary_on_path("fff-mcp")?;
     Some(serde_json::json!({
         "command": command.to_string_lossy().into_owned()
     }))
 }
+
 fn effective_configured_mcp_servers(
     parsed: &serde_json::Value,
     provider_profile: Option<&str>,
@@ -200,6 +238,7 @@ fn effective_configured_mcp_servers(
     }
     servers
 }
+
 fn filtered_profile_mcp_servers(
     parsed: &serde_json::Value,
     provider_profile: Option<&str>,
@@ -210,6 +249,7 @@ fn filtered_profile_mcp_servers(
         overrides,
     )
 }
+
 fn mcp_coordinator_binary_path() -> PathBuf {
     let repo_root = Path::new(config::repo_root());
     let base = repo_root.parent().unwrap_or(repo_root);
@@ -223,6 +263,7 @@ fn mcp_coordinator_binary_path() -> PathBuf {
         .join("release")
         .join(binary_name)
 }
+
 fn coordinator_server_spec(
     upstream_config_path: &Path,
     provider_profile: &str,
@@ -237,6 +278,7 @@ fn coordinator_server_spec(
         }
     })
 }
+
 fn ensure_json_object<'a>(
     object: &'a mut serde_json::Map<String, serde_json::Value>,
     key: &str,
@@ -249,6 +291,7 @@ fn ensure_json_object<'a>(
     }
     object.get_mut(key)?.as_object_mut()
 }
+
 fn provider_upstream_json(
     provider_profile: &str,
     servers: &serde_json::Map<String, serde_json::Value>,
@@ -270,6 +313,7 @@ fn provider_upstream_json(
     );
     serde_json::Value::Object(root)
 }
+
 fn runsc_mcp_restrictions_enabled(overrides: Option<&ProviderRequestOverrides>) -> bool {
     overrides
         .and_then(|overrides| overrides.runsc_image.as_ref())
@@ -287,7 +331,9 @@ fn runsc_mcp_restrictions_enabled(overrides: Option<&ProviderRequestOverrides>) 
             .as_deref()
             == Some("1")
 }
+
 const HOST_FILESYSTEM_ROOT: &str = "/";
+
 fn targets_trusted_workspace_root(arg: &str) -> bool {
     if arg == HOST_FILESYSTEM_ROOT {
         return true;
@@ -298,6 +344,7 @@ fn targets_trusted_workspace_root(arg: &str) -> bool {
         .iter()
         .any(|root| path == root || path.starts_with(root))
 }
+
 fn mcp_server_targets_host_filesystem(entry: &serde_json::Value) -> bool {
     let Some(object) = entry.as_object() else {
         return false;
@@ -323,6 +370,7 @@ fn mcp_server_targets_host_filesystem(entry: &serde_json::Value) -> bool {
 
     targets_host_root && (command_mentions_filesystem || args_mention_filesystem)
 }
+
 fn mcp_server_allowed_in_current_execution(
     name: &str,
     entry: &serde_json::Value,
@@ -338,6 +386,7 @@ fn mcp_server_allowed_in_current_execution(
 
     !mcp_server_targets_host_filesystem(entry)
 }
+
 fn filtered_mcp_servers(
     servers: &serde_json::Map<String, serde_json::Value>,
     overrides: Option<&ProviderRequestOverrides>,
@@ -348,6 +397,7 @@ fn filtered_mcp_servers(
         .map(|(name, entry)| (name.clone(), entry.clone()))
         .collect()
 }
+
 fn merge_mcp_json_with_coordinator(
     path: &Path,
     provider_profile: &str,
@@ -385,6 +435,7 @@ fn merge_mcp_json_with_coordinator(
 
     Some(existing)
 }
+
 fn merge_gemini_settings_for_runsc(
     source_path: &Path,
     upstream_servers: &serde_json::Map<String, serde_json::Value>,
@@ -421,12 +472,14 @@ fn merge_gemini_settings_for_runsc(
     }
     Some(existing)
 }
+
 fn codex_local_upstream_name(name: &str) -> &str {
     match name {
         "task-broker" => "taskserver",
         _ => name,
     }
 }
+
 fn json_string_array(value: &toml::Value) -> Option<Vec<serde_json::Value>> {
     let values = value
         .as_array()?
@@ -435,6 +488,7 @@ fn json_string_array(value: &toml::Value) -> Option<Vec<serde_json::Value>> {
         .collect::<Option<Vec<_>>>()?;
     Some(values)
 }
+
 fn json_string_map(value: &toml::Value) -> Option<serde_json::Map<String, serde_json::Value>> {
     let table = value.as_table()?;
     let mut map = serde_json::Map::new();
@@ -444,6 +498,7 @@ fn json_string_map(value: &toml::Value) -> Option<serde_json::Map<String, serde_
     }
     Some(map)
 }
+
 fn extract_codex_local_mcp_servers(
     toml_content: &str,
 ) -> serde_json::Map<String, serde_json::Value> {
@@ -506,12 +561,14 @@ fn extract_codex_local_mcp_servers(
     }
     servers
 }
+
 fn parse_mcp_server_section_name(line: &str) -> Option<String> {
     let trimmed = line.trim();
     let rest = trimmed.strip_prefix("[mcp_servers.")?;
     let name = rest.strip_suffix(']')?;
     Some(name.trim().trim_matches('"').to_string())
 }
+
 fn strip_codex_mcp_sections(toml_content: &str) -> String {
     enum BlockKind {
         Root,
@@ -544,12 +601,14 @@ fn strip_codex_mcp_sections(toml_content: &str) -> String {
 
     output.trim_end().to_string()
 }
+
 fn coordinator_sidecar_path(config_path: &Path) -> PathBuf {
     config_path
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join("mcp-coordinator-upstream.json")
 }
+
 fn gemini_coordinator_sidecar_path(settings_path: &Path) -> PathBuf {
     let parent = settings_path.parent().unwrap_or_else(|| Path::new("."));
     let stem = settings_path
@@ -559,6 +618,7 @@ fn gemini_coordinator_sidecar_path(settings_path: &Path) -> PathBuf {
         .unwrap_or_else(|| "settings".to_string());
     parent.join(format!("{stem}.mcp-coordinator-upstream.json"))
 }
+
 fn render_coordinator_codex_toml(sidecar_path: &Path) -> Result<String> {
     let mut servers = serde_json::Map::new();
     servers.insert(
@@ -567,6 +627,7 @@ fn render_coordinator_codex_toml(sidecar_path: &Path) -> Result<String> {
     );
     render_codex_mcp_toml(&servers)
 }
+
 fn render_codex_mcp_toml(servers: &serde_json::Map<String, serde_json::Value>) -> Result<String> {
     let mut toml = String::new();
     for (name, entry) in servers {
@@ -600,4 +661,153 @@ fn render_codex_mcp_toml(servers: &serde_json::Map<String, serde_json::Value>) -
     }
 
     Ok(toml)
+}
+
+/// Reads the shared `.mcp.json` config and writes provider-specific config files:
+/// - `.claude-desktop/.claude.json` (Claude)
+/// - `.gemini/settings.json` (Gemini)
+/// - `.codex/config.toml` (Codex)
+///
+/// Silently no-ops if `.mcp.json` does not exist or cannot be parsed.
+/// Returns an error when a provider config cannot be updated.
+fn sync_mcp_configs(
+    session: Option<&ChatSession>,
+    overrides: Option<&ProviderRequestOverrides>,
+) -> Result<()> {
+    let src = resolved_mcp_json_path(overrides);
+    let Some(parsed) = load_mcp_json_value(&src) else {
+        return Ok(());
+    };
+    let claude_servers =
+        filtered_profile_mcp_servers(&parsed, Some(MCP_PROVIDER_PROFILE_CLAUDE), overrides);
+    let gemini_servers =
+        filtered_profile_mcp_servers(&parsed, Some(MCP_PROVIDER_PROFILE_GEMINI), overrides);
+    let codex_servers =
+        filtered_profile_mcp_servers(&parsed, Some(MCP_PROVIDER_PROFILE_CODEX), overrides);
+    let codex_local_servers_present = resolved_codex_toml_paths(overrides).iter().any(|path| {
+        std::fs::read_to_string(path)
+            .map(|content| !extract_codex_local_mcp_servers(&content).is_empty())
+            .unwrap_or(false)
+    });
+    if claude_servers.is_empty()
+        && gemini_servers.is_empty()
+        && codex_servers.is_empty()
+        && !codex_local_servers_present
+    {
+        return Ok(());
+    }
+
+    if !claude_servers.is_empty() {
+        for claude_json in resolved_minimax_compat_json_paths(overrides) {
+            if let Some(merged) = merge_mcp_json_with_coordinator(
+                &claude_json,
+                MCP_PROVIDER_PROFILE_CLAUDE,
+                &claude_servers,
+                &claude_json,
+            ) {
+                let out = serde_json::to_vec_pretty(&merged)
+                    .context("failed to serialize Claude-compatible JSON")?;
+                write_file_atomically(&claude_json, &out).with_context(|| {
+                    format!(
+                        "failed to sync Claude-compatible MCP config from {} to {}",
+                        src.display(),
+                        claude_json.display()
+                    )
+                })?;
+            }
+        }
+    }
+
+    let gemini_source_path = gemini_settings_source_path(session, overrides);
+    let gemini_settings_path = resolved_gemini_settings_path(session, overrides);
+    if !gemini_servers.is_empty() {
+        let merged_gemini = if runsc_mcp_restrictions_enabled(overrides) {
+            let gemini_sidecar_path = gemini_coordinator_sidecar_path(&gemini_settings_path);
+            let out = serde_json::to_vec_pretty(&provider_upstream_json(
+                MCP_PROVIDER_PROFILE_GEMINI,
+                &gemini_servers,
+            ))
+            .context("failed to serialize Gemini coordinator upstream JSON")?;
+            write_file_atomically(&gemini_sidecar_path, &out).with_context(|| {
+                format!(
+                    "failed to sync Gemini coordinator upstream config from {} to {}",
+                    src.display(),
+                    gemini_sidecar_path.display()
+                )
+            })?;
+            merge_gemini_settings_for_runsc(
+                &gemini_source_path,
+                &gemini_servers,
+                &gemini_sidecar_path,
+            )
+        } else {
+            merge_mcp_json_with_coordinator(
+                &gemini_settings_path,
+                MCP_PROVIDER_PROFILE_GEMINI,
+                &gemini_servers,
+                &gemini_settings_path,
+            )
+        };
+        if let Some(merged) = merged_gemini {
+            let out =
+                serde_json::to_vec_pretty(&merged).context("failed to serialize Gemini JSON")?;
+            write_file_atomically(&gemini_settings_path, &out).with_context(|| {
+                format!(
+                    "failed to sync Gemini MCP config from {} to {}",
+                    src.display(),
+                    gemini_settings_path.display()
+                )
+            })?;
+        }
+    }
+
+    for codex_toml in resolved_codex_toml_paths(overrides) {
+        let existing = std::fs::read_to_string(&codex_toml).unwrap_or_default();
+        let mut routed_codex_servers = codex_servers.clone();
+        for (name, server) in extract_codex_local_mcp_servers(&existing) {
+            routed_codex_servers.insert(name, server);
+        }
+        let sidecar_path = coordinator_sidecar_path(&codex_toml);
+        if routed_codex_servers.is_empty() {
+            let _ = std::fs::remove_file(&sidecar_path);
+        } else {
+            let out = serde_json::to_vec_pretty(&provider_upstream_json(
+                MCP_PROVIDER_PROFILE_CODEX,
+                &routed_codex_servers,
+            ))
+            .context("failed to serialize Codex coordinator upstream JSON")?;
+            write_file_atomically(&sidecar_path, &out).with_context(|| {
+                format!(
+                    "failed to sync Codex coordinator upstream config from {} to {}",
+                    src.display(),
+                    sidecar_path.display()
+                )
+            })?;
+        }
+        let preserved = strip_codex_mcp_sections(&existing);
+        let coordinator_toml = if routed_codex_servers.is_empty() {
+            String::new()
+        } else {
+            render_coordinator_codex_toml(&sidecar_path)
+                .context("failed to render Codex coordinator MCP config")?
+        };
+        let merged = match (
+            preserved.trim().is_empty(),
+            coordinator_toml.trim().is_empty(),
+        ) {
+            (true, true) => String::new(),
+            (true, false) => coordinator_toml,
+            (false, true) => format!("{preserved}\n"),
+            (false, false) => format!("{preserved}\n\n{coordinator_toml}"),
+        };
+        write_file_atomically(&codex_toml, merged.as_bytes()).with_context(|| {
+            format!(
+                "failed to sync Codex MCP config from {} to {}",
+                src.display(),
+                codex_toml.display()
+            )
+        })?;
+    }
+
+    Ok(())
 }

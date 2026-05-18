@@ -49,6 +49,30 @@ fn push_runsc_dirs_mounts(mounts: &mut Vec<RunscMount>, runsc_dirs: &[String]) {
         }
     }
 }
+fn resolved_gemini_runsc_home_dir(
+    session: Option<&ChatSession>,
+    overrides: Option<&ProviderRequestOverrides>,
+) -> Option<PathBuf> {
+    let settings_path = resolved_gemini_settings_path(session, overrides);
+    let settings_dir = settings_path.parent().map(Path::to_path_buf);
+    let shared_dir = config::get_config_dir(ModelProvider::Gemini)
+        .map(PathBuf::from)
+        .filter(|path| path.exists());
+    let legacy_dir = dirs::home_dir()
+        .map(|home| home.join(".gemini"))
+        .filter(|path| path.exists());
+
+    for candidate in [&settings_dir, &shared_dir, &legacy_dir] {
+        if candidate
+            .as_ref()
+            .is_some_and(|path| path.join("projects.json").exists())
+        {
+            return candidate.clone();
+        }
+    }
+
+    shared_dir.or(settings_dir).or(legacy_dir)
+}
 const GEMINI_RUNSC_HOME_SIDECAR_FILES: &[&str] = &[
     "google_accounts.json",
     "installation_id",
@@ -93,6 +117,26 @@ fn gemini_runsc_home_sidecar_path(source: &Path) -> Option<PathBuf> {
     }
 
     None
+}
+fn prepare_gemini_runsc_home_dir(
+    session: Option<&ChatSession>,
+    overrides: Option<&ProviderRequestOverrides>,
+) -> Option<PathBuf> {
+    let source_dir = resolved_gemini_runsc_home_dir(session, overrides)?;
+    let sidecar_dir = gemini_runsc_home_sidecar_path(&source_dir)?;
+    std::fs::create_dir_all(&sidecar_dir).ok()?;
+
+    for file_name in GEMINI_RUNSC_HOME_SIDECAR_FILES {
+        let source = source_dir.join(file_name);
+        let destination = sidecar_dir.join(file_name);
+        if source.is_file() {
+            std::fs::copy(&source, &destination).ok()?;
+        } else {
+            let _ = std::fs::remove_file(&destination);
+        }
+    }
+
+    Some(sidecar_dir)
 }
 fn output_schema_sidecar_path(schema: &str) -> PathBuf {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -309,6 +353,37 @@ fn ensure_codex_home_dir(overrides: Option<&ProviderRequestOverrides>) -> PathBu
     let _ = std::fs::create_dir_all(&codex_home);
     codex_home
 }
+fn gemini_runsc_mounts(
+    session: Option<&ChatSession>,
+    overrides: Option<&ProviderRequestOverrides>,
+) -> Vec<RunscMount> {
+    let mut mounts = Vec::new();
+    push_shared_runsc_mounts(&mut mounts);
+    let settings_path = resolved_gemini_settings_path(session, overrides);
+    push_runsc_mount(&mut mounts, RunscMount::same_path(settings_path.clone()));
+    push_runsc_mount(
+        &mut mounts,
+        RunscMount::same_path(gemini_coordinator_sidecar_path(&settings_path)),
+    );
+    if let Some(global_dir) = prepare_gemini_runsc_home_dir(session, overrides) {
+        push_runsc_mount(
+            &mut mounts,
+            RunscMount::container_home(global_dir, Path::new(".gemini")),
+        );
+    }
+    push_runsc_mount(
+        &mut mounts,
+        RunscMount::container_home(&settings_path, Path::new(".gemini/settings.json")),
+    );
+    // Push user-specified runsc dirs
+    if let Some(runsc_dirs) = overrides
+        .and_then(|o| Some(&o.runsc_dirs))
+        .filter(|d| !d.is_empty())
+    {
+        push_runsc_dirs_mounts(&mut mounts, runsc_dirs);
+    }
+    mounts
+}
 fn qwen_runsc_mounts(overrides: Option<&ProviderRequestOverrides>) -> Vec<RunscMount> {
     let mut mounts = Vec::new();
     if let Some(runsc_dirs) = overrides.and_then(|o| Some(&o.runsc_dirs)).filter(|d| !d.is_empty()) {
@@ -430,6 +505,31 @@ fn ensure_minimax_layout(path: &PathBuf) {
             let _ = std::fs::copy(&_minimax_json, &claude_json);
         }
     }
+}
+pub fn to_provider_session(session: Option<&ChatSession>) -> Option<ProviderSession> {
+    let session = session?;
+    Some(ProviderSession {
+        working_dir: session.launched_from.clone(),
+        claude_session_id: session.claude_session_id.clone(),
+        glm_session_id: None,
+        minimax_session_id: session.minimax_session_id.clone(),
+        qwen_session_id: session.qwen_session_id.clone(),
+        codex_session_id: session.codex_session_id.clone(),
+        nemotron_session_id: session.nvidia_session_id.clone(),
+        gemini_session_id: session.gemini_session_id.clone(),
+        openrouter_session_id: session.openrouter_session_id.clone(),
+        omniforge_session_id: session.omniforge_session_id.clone(),
+        kimi_session_id: session.kimi_session_id.clone(),
+        messages: session
+            .messages
+            .iter()
+            .map(|message| ProviderMessage {
+                content: message.content.clone(),
+                is_user: message.is_user,
+                history_content: None,
+            })
+            .collect(),
+    })
 }
 pub fn to_provider_memory_context(
     memory_context: Option<&MemoryContext>,
