@@ -415,6 +415,64 @@ fn ensure_codex_home_dir(overrides: Option<&ProviderRequestOverrides>) -> PathBu
     let _ = std::fs::create_dir_all(&codex_home);
     codex_home
 }
+pub fn codex_compat_config(
+    provider: ModelProvider,
+    overrides: Option<&ProviderRequestOverrides>,
+) -> CodexCliConfig {
+    let entry = crate::provider_catalog::by_id(provider);
+    let mut extra_env = Vec::new();
+
+    if provider == ModelProvider::Codex {
+        extra_env.push((
+            "CODEX_HOME".to_string(),
+            ensure_codex_home_dir(overrides).to_string_lossy().into_owned(),
+        ));
+    }
+
+    // Nvidia-specific: API key and CODEX_HOME bootstrap
+    if provider == ModelProvider::Nvidia {
+        if let Some(api_key) = provider_api_key(provider) {
+            extra_env.push(("OPENAI_API_KEY".to_string(), api_key));
+        }
+        if let Some(codex_home) = ensure_nvidia_codex_home(overrides) {
+            extra_env.push((
+                "CODEX_HOME".to_string(),
+                codex_home.to_string_lossy().into_owned(),
+            ));
+        }
+    }
+
+    let model = if entry.interactive_model.is_empty() {
+        None
+    } else {
+        Some(entry.interactive_model.to_string())
+    };
+
+    CodexCliConfig {
+        cli: string_override(
+            overrides.and_then(|o| o.cli.as_ref()),
+            TEST_PROVIDER_CLI_ENV,
+            config::codex_cli_path,
+        ),
+        model,
+        output_schema: resolved_output_schema_path(overrides),
+        json_stream: config::CODEX_JSON_STREAM,
+        reasoning_effort: config::effective_reasoning_effort_for_provider(provider),
+        sandbox_mode: config::CODEX_SANDBOX_MODE.map(str::to_string),
+        force_skip_git_repo_check: overrides.is_some_and(|o| o.force_skip_git_repo_check),
+        skip_git_repo_check_prefixes: config::trusted_workspace_roots(),
+        extra_env,
+        runsc_image: optional_string_override(
+            overrides.and_then(|o| o.runsc_image.as_ref()),
+            "RUST_CHATBOT_BACKGROUND_RUNSC_IMAGE",
+        ), // Disabled fallback
+        runsc_workspace_includes: string_list_override(
+            overrides.and_then(|o| Some(&o.runsc_workspace_includes)),
+            BACKGROUND_RUNSC_WORKSPACE_INCLUDES_ENV,
+        ),
+        runsc_mounts: codex_runsc_mounts(overrides),
+    }
+}
 fn gemini_runsc_mounts(
     session: Option<&ChatSession>,
     overrides: Option<&ProviderRequestOverrides>,
@@ -445,6 +503,41 @@ fn gemini_runsc_mounts(
         push_runsc_dirs_mounts(&mut mounts, runsc_dirs);
     }
     mounts
+}
+pub fn gemini_cli_config(
+    session: Option<&ChatSession>,
+    overrides: Option<&ProviderRequestOverrides>,
+) -> GeminiCliConfig {
+    let project_settings_path = resolved_gemini_settings_path(session, overrides);
+    let cli =
+        resolve_cli_launch_path(crate::provider_catalog::by_id(ModelProvider::Gemini).cli_binary);
+    let mut extra_env = Vec::new();
+    push_cli_runtime_path_env(&mut extra_env, &cli);
+    if let Some(api_key) = gemini_cli_fallback_api_key() {
+        upsert_env_var(&mut extra_env, "GEMINI_API_KEY", api_key);
+    }
+    upsert_env_var(&mut extra_env, "GEMINI_CLI_TRUST_WORKSPACE", "true".to_string());
+    upsert_env_var(&mut extra_env, "GEMINI_FORCE_FILE_STORAGE", "true".to_string());
+    upsert_env_var(&mut extra_env, "TINI_SUBREAPER", "1".to_string());
+    GeminiCliConfig {
+        cli,
+        model: config::interactive_model_for(ModelProvider::Gemini).map(str::to_string),
+        output_format: config::GEMINI_OUTPUT_FORMAT.to_string(),
+        approval_mode: config::GEMINI_APPROVAL_MODE.map(str::to_string),
+        include_directories: Vec::new(),
+        project_settings_path: Some(project_settings_path),
+        extra_env,
+        runsc_image: optional_string_override(
+            overrides.and_then(|overrides| overrides.runsc_image.as_ref()),
+            "RUST_CHATBOT_BACKGROUND_RUNSC_IMAGE",
+        )
+        .or_else(|| Some(config::background_runsc_image())),
+        runsc_workspace_includes: string_list_override(
+            overrides.and_then(|overrides| Some(&overrides.runsc_workspace_includes)),
+            BACKGROUND_RUNSC_WORKSPACE_INCLUDES_ENV,
+        ),
+        runsc_mounts: gemini_runsc_mounts(session, overrides),
+    }
 }
 fn qwen_runsc_mounts(overrides: Option<&ProviderRequestOverrides>) -> Vec<RunscMount> {
     let mut mounts = Vec::new();

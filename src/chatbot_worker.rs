@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::sync::{mpsc, Arc};
 use crate::chatbot_worker_trace as trace;
+use crate::config;
 use crate::model::ModelProvider;
 use crate::worker::{self, WorkerJobSnapshot, WorkerRequest, WorkerResult, WorkerState};
 use crate::worker_ext;
@@ -104,6 +105,82 @@ fn parse_worker_extension_request(
     let parsed =
         serde_json::from_str(&request.query).context("failed to parse worker extension request")?;
     Ok(Some(parsed))
+}
+fn execute_worker_extension_request<FB, FA>(
+    request: WorkerExtensionRequest,
+    stop_signal: Arc<AtomicBool>,
+    background_runner: FB,
+    ast_search_runner: FA,
+) -> Result<String>
+where
+    FB: FnOnce(
+        Option<usize>,
+        Vec<BackgroundDispatchTaskRequest>,
+        Arc<AtomicBool>,
+    ) -> Result<worker_ext::background::MergedResults>,
+    FA: FnOnce(
+        String,
+        worker_ext::ast_search::Language,
+        Vec<String>,
+    ) -> Result<worker_ext::ast_search::AstSearchResponse>,
+{
+    let response = match request {
+        WorkerExtensionRequest::BackgroundDispatch {
+            max_concurrent,
+            tasks,
+        } => WorkerExtensionResponse::BackgroundDispatch {
+            max_concurrent: max_concurrent.unwrap_or_else(config::background_max_concurrent),
+            merged: background_runner(max_concurrent, tasks, stop_signal)?,
+        },
+        WorkerExtensionRequest::AstSearch {
+            pattern,
+            language,
+            paths,
+        } => WorkerExtensionResponse::AstSearch {
+            result: ast_search_runner(pattern, language, paths)?,
+        },
+    };
+
+    serde_json::to_string_pretty(&response).context("failed to serialize worker extension response")
+}
+fn run_background_dispatch(
+    max_concurrent: Option<usize>,
+    tasks: Vec<BackgroundDispatchTaskRequest>,
+    stop_signal: Arc<AtomicBool>,
+) -> Result<worker_ext::background::MergedResults> {
+    let mut dispatcher = worker_ext::background::BackgroundDispatcher::new(
+        max_concurrent.unwrap_or_else(config::background_max_concurrent),
+    );
+    for task in tasks {
+        dispatcher.add_task(worker_ext::background::BackgroundTask {
+            id: uuid::Uuid::new_v4(),
+            agent_profile: worker_ext::background::AgentProfile {
+                role: task.role,
+                provider: Some(task.provider),
+            },
+            prompt: task.prompt,
+            context_budget: task.context_budget,
+            system_prompt: task.system_prompt,
+            working_dir: task.working_dir,
+            resume_session_id: task.resume_session_id,
+        });
+    }
+
+    let task_stop_signal = Arc::clone(&stop_signal);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(dispatcher.max_concurrent.max(1))
+        .build()
+        .context("failed to create background dispatch runtime")?;
+
+    runtime.block_on(async move {
+        dispatcher
+            .run_all_with_executor(worker_ext::background::provider_task_executor(
+                task_stop_signal,
+            ))
+            .await;
+        Ok::<worker_ext::background::MergedResults, anyhow::Error>(dispatcher.take_merged().await)
+    })
 }
 fn run_ast_search(
     pattern: String,

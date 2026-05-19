@@ -5,6 +5,7 @@ pub(super) mod openrouter_prompt;
 pub(super) mod session_ids;
 pub(super) mod types;
 pub use dispatcher::BackgroundDispatcher;
+pub use executor::provider_task_executor;
 pub use types::{
     AgentProfile, BackgroundResult, BackgroundTask, BackgroundTaskExecutor, BoxedBackgroundFuture,
     MergedResults,
