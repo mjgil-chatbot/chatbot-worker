@@ -23,9 +23,35 @@ use anyhow::Result;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command as TokioCommand;
 use tokio::time::{sleep, Duration};
+use crate::adapter_live_summary::LiveSummaryContext;
+use crate::adapter_transport::append_transport_error_log;
 use crate::model::ModelProvider;
+use crate::stream::append_event;
 use crate::stream::StreamEvent;
 use crate::worker::WorkerRequest;
+/// Result from running an adapter-backed provider CLI.
+pub struct AdapterResult {
+    /// Final accumulated text output.
+    pub output: String,
+    /// Session ID for resumption (provider-specific).
+    pub session_id: Option<String>,
+    /// Provider-specific summary data.
+    pub summary: Option<crate::summary::JsonSummary>,
+    /// Error message if the run failed.
+    pub error: Option<String>,
+}
+fn adapter_failure(
+    output: String,
+    session_id: Option<String>,
+    error: impl std::fmt::Display,
+) -> AdapterResult {
+    AdapterResult {
+        output,
+        session_id,
+        summary: None,
+        error: Some(error.to_string()),
+    }
+}
 fn raw_provider_event_error_message(payload: &serde_json::Value) -> Option<String> {
     let event_type = payload.get("type").and_then(|value| value.as_str());
     if event_type == Some("error") {
@@ -66,6 +92,31 @@ pub(crate) async fn wait_for_stop_signal(stop_signal: &AtomicBool) {
     while !stop_signal.load(Ordering::Relaxed) {
         sleep(Duration::from_millis(50)).await;
     }
+}
+fn log_transport_retry(
+    request: &WorkerRequest,
+    summary_context: &LiveSummaryContext,
+    events: &Path,
+    message: &str,
+) {
+    match append_transport_error_log(&request.chat_id, message) {
+        Ok(path) => rust_debug::tracing::warn!(
+            chat_id=%request.chat_id,
+            path=%path.display(),
+            message,
+            "logged adapter transport error"
+        ),
+        Err(err) => rust_debug::tracing::warn!(
+            chat_id=%request.chat_id,
+            error=%err,
+            message,
+            "failed to persist adapter transport error log"
+        ),
+    }
+    let _ = append_event(
+        events,
+        &StreamEvent::live_summary(summary_context.diagnostic_line(message)),
+    );
 }
 fn ensure_minimax_adapter_layout(path: &Path) {
     let _ = std::fs::create_dir_all(path);
