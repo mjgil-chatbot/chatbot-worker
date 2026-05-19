@@ -2,13 +2,19 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
+
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
+
 use crate::data::{ChatSession, SessionInfo, SessionMetadata};
+use crate::memory;
+use crate::model::ModelProvider;
+
 const SCHEMA_VERSION: i64 = 2;
 const INDEX_DIR_NAME: &str = ".rust-chatbot";
 const INDEX_FILE_NAME: &str = "index.db";
+
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_meta (
     key   TEXT PRIMARY KEY,
@@ -37,25 +43,30 @@ CREATE VIRTUAL TABLE IF NOT EXISTS session_fts USING fts5(
     tokenize='porter unicode61'
 );
 "#;
+
 #[derive(Clone)]
 pub struct StorageIndex {
     pub(crate) conn: Arc<Mutex<Connection>>,
 }
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StorageRowCounts {
     pub session_index: u64,
     pub session_fts: u64,
 }
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SessionCounts {
     pub total: u64,
     pub hidden: u64,
 }
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IndexedWorkspace {
     pub workspace_id: String,
     pub workspace_path: String,
 }
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RebuildReport {
     pub sessions_indexed: u64,
@@ -64,6 +75,7 @@ pub struct RebuildReport {
     pub drifted_tables: Vec<String>,
     pub warnings: Vec<String>,
 }
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StorageIntegrityReport {
     pub authoritative_counts: StorageRowCounts,
@@ -71,6 +83,7 @@ pub struct StorageIntegrityReport {
     pub drifted_tables: Vec<String>,
     pub warnings: Vec<String>,
 }
+
 #[derive(Clone, Debug)]
 struct SessionDocument {
     session_id: String,
@@ -85,12 +98,14 @@ struct SessionDocument {
     hidden: bool,
     fts_content: String,
 }
+
 pub fn index_db_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("/tmp"))
         .join(INDEX_DIR_NAME)
         .join(INDEX_FILE_NAME)
 }
+
 pub fn open_index() -> Result<Connection> {
     let path = index_db_path();
     if let Some(parent) = path.parent() {
@@ -103,40 +118,49 @@ pub fn open_index() -> Result<Connection> {
     ensure_schema(&conn)?;
     Ok(conn)
 }
+
 impl StorageIndex {
     pub fn open() -> Result<Self> {
         Ok(Self {
             conn: Arc::new(Mutex::new(open_index()?)),
         })
-    }}
-impl StorageIndex {
+    }
+
     pub fn open_default() -> Result<Self> {
         Self::open()
-    }}
-impl StorageIndex {
+    }
+
     pub fn path(&self) -> PathBuf {
         index_db_path()
-    }}
-impl StorageIndex {
+    }
+
     pub fn is_available(&self) -> bool {
         self.conn.lock().is_ok()
-    }}
-impl StorageIndex {
+    }
+
     pub fn connection(&self) -> MutexGuard<'_, Connection> {
         match self.conn.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         }
-    }}
-impl StorageIndex {
+    }
+
+    pub fn rebuild_all(&self) -> Result<RebuildReport> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("storage index lock poisoned"))?;
+        rebuild_all_locked(&mut conn)
+    }
+
     pub fn row_counts(&self) -> Result<StorageRowCounts> {
         let conn = self
             .conn
             .lock()
             .map_err(|_| anyhow::anyhow!("storage index lock poisoned"))?;
         row_counts_with_conn(&conn)
-    }}
-impl StorageIndex {
+    }
+
     pub fn session_counts(&self) -> Result<SessionCounts> {
         let conn = self
             .conn
@@ -153,7 +177,26 @@ impl StorageIndex {
             total: total.max(0) as u64,
             hidden: hidden.max(0) as u64,
         })
-    }}
+    }
+
+    pub fn integrity_report(&self) -> Result<StorageIntegrityReport> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("storage index lock poisoned"))?;
+        let indexed_counts = row_counts_with_conn(&conn)?;
+        let authoritative_counts =
+            authoritative_counts(&collect_all_session_documents(&mut Vec::new())?);
+        let drifted_tables = collect_index_drift(&authoritative_counts, &indexed_counts);
+        Ok(StorageIntegrityReport {
+            authoritative_counts,
+            indexed_counts,
+            drifted_tables,
+            warnings: Vec::new(),
+        })
+    }
+}
+
 pub fn upsert_session(
     conn: &Connection,
     session_id: &str,
@@ -195,6 +238,7 @@ pub fn upsert_session(
     )?;
     Ok(())
 }
+
 pub fn set_session_hidden(conn: &Connection, session_id: &str, hidden: bool) -> Result<()> {
     conn.execute(
         "UPDATE session_index SET hidden = ?1 WHERE session_id = ?2",
@@ -202,6 +246,7 @@ pub fn set_session_hidden(conn: &Connection, session_id: &str, hidden: bool) -> 
     )?;
     Ok(())
 }
+
 pub fn upsert_session_fts(conn: &Connection, session_id: &str, content: &str) -> Result<()> {
     conn.execute(
         "DELETE FROM session_fts WHERE session_id = ?1",
@@ -213,6 +258,7 @@ pub fn upsert_session_fts(conn: &Connection, session_id: &str, content: &str) ->
     )?;
     Ok(())
 }
+
 pub fn delete_session(conn: &Connection, session_id: &str) -> Result<()> {
     conn.execute(
         "DELETE FROM session_fts WHERE session_id = ?1",
@@ -224,10 +270,12 @@ pub fn delete_session(conn: &Connection, session_id: &str) -> Result<()> {
     )?;
     Ok(())
 }
+
 pub fn index_has_sessions(conn: &Connection) -> Result<bool> {
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM session_index", [], |row| row.get(0))?;
     Ok(count > 0)
 }
+
 pub fn list_sessions_from_index(
     conn: &Connection,
     provider_name: &str,
@@ -263,6 +311,7 @@ pub fn list_sessions_from_index(
     }
     Ok(sessions)
 }
+
 pub fn list_workspaces_from_index(
     conn: &Connection,
     provider_name: &str,
@@ -288,6 +337,7 @@ pub fn list_workspaces_from_index(
     }
     Ok(workspaces)
 }
+
 pub fn list_session_ids_for_workspace(
     conn: &Connection,
     provider_name: &str,
@@ -306,6 +356,7 @@ pub fn list_session_ids_for_workspace(
     }
     Ok(session_ids)
 }
+
 pub fn search_sessions_fts(conn: &Connection, query: &str) -> Result<Vec<String>> {
     let terms: Vec<String> = query
         .split_whitespace()
@@ -327,6 +378,7 @@ pub fn search_sessions_fts(conn: &Connection, query: &str) -> Result<Vec<String>
     }
     Ok(ids)
 }
+
 pub fn session_fts_content(session: &ChatSession) -> String {
     let mut out = String::new();
     append_fts_chunk(&mut out, &session.name);
@@ -341,6 +393,7 @@ pub fn session_fts_content(session: &ChatSession) -> String {
     }
     out
 }
+
 fn append_fts_chunk(out: &mut String, chunk: &str) {
     if chunk.is_empty() {
         return;
@@ -350,15 +403,44 @@ fn append_fts_chunk(out: &mut String, chunk: &str) {
     }
     out.push_str(chunk);
 }
+
 pub fn session_fingerprint_i64(session: &ChatSession) -> i64 {
     session.history_fingerprint() as i64
 }
+
+pub fn rebuild_session_index(
+    conn: &Connection,
+    data_dir: &Path,
+    provider_name: &str,
+) -> Result<()> {
+    clear_session_rows_for_provider(conn, provider_name)?;
+    let documents = collect_provider_session_documents(data_dir, provider_name)?;
+    for document in documents {
+        upsert_session(
+            conn,
+            &document.session_id,
+            &document.provider,
+            &document.name,
+            &document.created_at,
+            &document.updated_at,
+            document.message_count,
+            Some(document.fingerprint),
+            document.workspace_id.as_deref(),
+            document.workspace_path.as_deref(),
+            document.hidden,
+        )?;
+        upsert_session_fts(conn, &document.session_id, &document.fts_content)?;
+    }
+    Ok(())
+}
+
 fn configure_connection(conn: &Connection) -> Result<()> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     Ok(())
 }
+
 fn ensure_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(SCHEMA)?;
     // Existing installations may pre-date the current schema columns.
@@ -375,6 +457,7 @@ fn ensure_schema(conn: &Connection) -> Result<()> {
     }
     Ok(())
 }
+
 fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str) -> Result<()> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
@@ -389,6 +472,7 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str)
     )?;
     Ok(())
 }
+
 fn read_schema_version(conn: &Connection) -> Result<i64> {
     let version = conn.query_row(
         "SELECT value FROM schema_meta WHERE key = 'schema_version'",
@@ -401,17 +485,62 @@ fn read_schema_version(conn: &Connection) -> Result<i64> {
         Err(err) => Err(err.into()),
     }
 }
+
+fn rebuild_all_locked(conn: &mut Connection) -> Result<RebuildReport> {
+    ensure_schema(conn)?;
+    let mut warnings = Vec::new();
+    let sessions = collect_all_session_documents(&mut warnings)?;
+    let source_counts = authoritative_counts(&sessions);
+
+    let tx = conn.transaction()?;
+    tx.execute("DELETE FROM session_fts", [])?;
+    tx.execute("DELETE FROM session_index", [])?;
+
+    let mut sessions_indexed = 0u64;
+    for session in &sessions {
+        upsert_session(
+            &tx,
+            &session.session_id,
+            &session.provider,
+            &session.name,
+            &session.created_at,
+            &session.updated_at,
+            session.message_count,
+            Some(session.fingerprint),
+            session.workspace_id.as_deref(),
+            session.workspace_path.as_deref(),
+            session.hidden,
+        )?;
+        upsert_session_fts(&tx, &session.session_id, &session.fts_content)?;
+        sessions_indexed += 1;
+    }
+    tx.commit()?;
+
+    let indexed_counts = row_counts_with_conn(conn)?;
+    let drifted_tables = collect_index_drift(&source_counts, &indexed_counts);
+
+    Ok(RebuildReport {
+        sessions_indexed,
+        source_counts,
+        indexed_counts,
+        drifted_tables,
+        warnings,
+    })
+}
+
 fn row_counts_with_conn(conn: &Connection) -> Result<StorageRowCounts> {
     Ok(StorageRowCounts {
         session_index: count_rows(conn, "session_index")?,
         session_fts: count_rows(conn, "session_fts")?,
     })
 }
+
 fn count_rows(conn: &Connection, table: &str) -> Result<u64> {
     let query = format!("SELECT COUNT(*) FROM {table}");
     let count: i64 = conn.query_row(&query, [], |row| row.get(0))?;
     Ok(count.max(0) as u64)
 }
+
 fn clear_session_rows_for_provider(conn: &Connection, provider_name: &str) -> Result<()> {
     let session_ids = {
         let mut stmt = conn.prepare("SELECT session_id FROM session_index WHERE provider = ?1")?;
@@ -435,6 +564,78 @@ fn clear_session_rows_for_provider(conn: &Connection, provider_name: &str) -> Re
     )?;
     Ok(())
 }
+
+fn collect_all_session_documents(warnings: &mut Vec<String>) -> Result<Vec<SessionDocument>> {
+    let mut documents = Vec::new();
+    let home = match dirs::home_dir() {
+        Some(home) => home,
+        None => {
+            warnings.push("could not resolve home directory while rebuilding index".to_string());
+            return Ok(documents);
+        }
+    };
+
+    for provider in ModelProvider::ALL {
+        let provider_name = provider.as_str();
+        let data_dir = crate::config::resolve_data_dir_under_home(provider, &home);
+        documents.extend(collect_provider_session_documents(
+            &data_dir,
+            provider_name,
+        )?);
+    }
+
+    documents.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    Ok(documents)
+}
+
+fn collect_provider_session_documents(
+    data_dir: &Path,
+    provider_name: &str,
+) -> Result<Vec<SessionDocument>> {
+    let sessions_dir = data_dir.join("sessions");
+    let hidden_sessions = load_hidden_sessions(data_dir)?;
+    let entries = match fs::read_dir(&sessions_dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => {
+            return Err(err).with_context(|| format!("failed to read {}", sessions_dir.display()));
+        }
+    };
+
+    let mut documents = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let raw = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let session: ChatSession = serde_json::from_str(&raw)
+            .with_context(|| format!("failed to parse {}", path.display()))?;
+        let (workspace_id, workspace_path) = session_workspace_fields(&session);
+        documents.push(SessionDocument {
+            session_id: session.id.clone(),
+            provider: provider_name.to_string(),
+            name: session.name.clone(),
+            created_at: session.created_at.to_rfc3339(),
+            updated_at: session.updated_at.to_rfc3339(),
+            message_count: session
+                .messages
+                .iter()
+                .filter(|message| message.is_user)
+                .count() as i64,
+            fingerprint: session_fingerprint_i64(&session),
+            workspace_id,
+            workspace_path,
+            hidden: hidden_sessions.get(&session.id).copied().unwrap_or(false),
+            fts_content: session_fts_content(&session),
+        });
+    }
+
+    Ok(documents)
+}
+
 fn load_hidden_sessions(data_dir: &Path) -> Result<HashMap<String, bool>> {
     let metadata_path = data_dir.join("sessions.json");
     if !metadata_path.is_file() {
@@ -451,6 +652,7 @@ fn load_hidden_sessions(data_dir: &Path) -> Result<HashMap<String, bool>> {
         .map(|(session_id, info)| (session_id, info.hidden))
         .collect())
 }
+
 fn authoritative_counts(sessions: &[SessionDocument]) -> StorageRowCounts {
     let count = sessions.len() as u64;
     StorageRowCounts {
@@ -458,6 +660,7 @@ fn authoritative_counts(sessions: &[SessionDocument]) -> StorageRowCounts {
         session_fts: count,
     }
 }
+
 fn collect_index_drift(
     authoritative: &StorageRowCounts,
     indexed: &StorageRowCounts,
@@ -477,6 +680,7 @@ fn collect_index_drift(
     );
     drift
 }
+
 fn push_drift(messages: &mut Vec<String>, label: &str, expected: u64, actual: u64) {
     if expected != actual {
         messages.push(format!(
@@ -484,13 +688,29 @@ fn push_drift(messages: &mut Vec<String>, label: &str, expected: u64, actual: u6
         ));
     }
 }
+
 fn sanitize_fts_term(term: &str) -> String {
     term.chars()
         .filter(|ch| ch.is_alphanumeric() || matches!(ch, '_' | '-'))
         .collect()
 }
+
+fn session_workspace_fields(session: &ChatSession) -> (Option<String>, Option<String>) {
+    let Some(launched_from) = session.launched_from.as_deref() else {
+        return (None, None);
+    };
+    match memory::workspace_memory_paths(launched_from) {
+        Ok(paths) => (
+            Some(paths.workspace_id),
+            Some(paths.workspace_root.to_string_lossy().into_owned()),
+        ),
+        Err(_) => (None, None),
+    }
+}
+
 fn parse_rfc3339(input: &str) -> Result<DateTime<Utc>> {
     Ok(DateTime::parse_from_rfc3339(input)?.with_timezone(&Utc))
 }
+
 #[cfg(test)]
 mod tests;
