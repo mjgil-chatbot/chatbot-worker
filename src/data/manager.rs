@@ -33,6 +33,31 @@ impl DataManager {
         Ok(Self { data_dir, provider })
     }}
 impl DataManager {
+    pub fn load_session(&self, session_id: &str) -> Result<ChatSession> {
+        self.read_session(session_id)
+    }}
+impl DataManager {
+    fn read_session(&self, session_id: &str) -> Result<ChatSession> {
+        let session_path = self.session_path(session_id);
+        let session_json = fs::read_to_string(&session_path)?;
+        let mut session: ChatSession = serde_json::from_str(&session_json)?;
+        self.provider.normalize_loaded_session(&mut session);
+        debug!(
+            session_id=%session_id,
+            session_name=%session.name,
+            path=%session_path.display(),
+            total_messages=session.messages.len(),
+            has_system_prompt=session
+                .system_prompt
+                .as_deref()
+                .map(|prompt| !prompt.trim().is_empty())
+                .unwrap_or(false),
+            last_message_at=?session.messages.last().map(|message| message.timestamp),
+            "session loaded"
+        );
+        Ok(session)
+    }}
+impl DataManager {
     fn log_session_write_request(
         &self,
         write_source: &str,
@@ -79,6 +104,127 @@ impl DataManager {
         let _ = atomic_write(&cache_path, &cache_json)?;
         debug!(session_id=%cache.session_id, path=%cache_path.display(), "height cache saved");
         Ok(())
+    }}
+impl DataManager {
+    /// Scans the sessions directory for orphaned files not yet in the index
+    /// and appends them to the sessions list.
+    fn discover_orphaned_sessions(
+        &self,
+        sessions: &mut Vec<SessionInfo>,
+        indexed_ids: &HashSet<String>,
+    ) {
+        let sessions_dir = self.data_dir.join("sessions");
+        let Some(entries) = fs::read_dir(&sessions_dir).ok() else {
+            return;
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let file_stem = match path.file_stem().and_then(|s| s.to_str()) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            if indexed_ids.contains(&file_stem) {
+                continue;
+            }
+            // Orphaned file — read it to get session info.
+            debug!(path=%path.display(), "found orphaned session file, reading for index");
+            let raw = match fs::read_to_string(&path) {
+                Ok(raw) => raw,
+                Err(_) => continue,
+            };
+            let mut session: ChatSession = match serde_json::from_str(&raw) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            self.provider.normalize_loaded_session(&mut session);
+            sessions.push(SessionInfo {
+                id: session.id.clone(),
+                name: session.name.clone(),
+                created_at: session.created_at,
+                updated_at: session.updated_at,
+                message_count: session.messages.iter().filter(|m| m.is_user).count(),
+                hidden: false,
+            });
+        }
+    }}
+impl DataManager {
+    /// Original list_sessions implementation using metadata index + file scan.
+    fn list_sessions_fallback(&self) -> Result<Vec<SessionInfo>> {
+        let metadata = self.load_metadata()?;
+
+        // Fast path: use metadata index as the primary source.
+        // save_session() already keeps this up-to-date, so we only need
+        // to fall back to a full file scan for orphaned session files
+        // that were never indexed (e.g. created by older versions).
+        if !metadata.sessions.is_empty() {
+            let indexed_ids: HashSet<String> = metadata
+                .sessions
+                .keys()
+                .cloned()
+                .collect::<HashSet<String>>();
+            let mut sessions: Vec<SessionInfo> = metadata
+                .sessions
+                .values()
+                .filter(|info| !info.hidden)
+                .cloned()
+                .collect();
+
+            // Check for orphaned session files not in the index.
+            self.discover_orphaned_sessions(&mut sessions, &indexed_ids);
+
+            sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+            debug!(
+                count = sessions.len(),
+                "sessions listed (from metadata index)"
+            );
+            return Ok(sessions);
+        }
+
+        // Slow path: no metadata index yet — full file scan (first run only).
+        let sessions_dir = self.data_dir.join("sessions");
+        let mut sessions = Vec::new();
+
+        if let Ok(entries) = fs::read_dir(&sessions_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                    continue;
+                }
+
+                let raw = match fs::read_to_string(&path) {
+                    Ok(raw) => raw,
+                    Err(err) => {
+                        debug!(path=%path.display(), error=%err, "skipping unreadable session file during list_sessions");
+                        continue;
+                    }
+                };
+                let mut session: ChatSession = match serde_json::from_str(&raw) {
+                    Ok(session) => session,
+                    Err(err) => {
+                        debug!(path=%path.display(), error=%err, "skipping invalid session file during list_sessions");
+                        continue;
+                    }
+                };
+                self.provider.normalize_loaded_session(&mut session);
+
+                sessions.push(SessionInfo {
+                    id: session.id.clone(),
+                    name: session.name.clone(),
+                    created_at: session.created_at,
+                    updated_at: session.updated_at,
+                    message_count: session.messages.iter().filter(|m| m.is_user).count(),
+                    hidden: false,
+                });
+            }
+        }
+
+        sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        debug!(count = sessions.len(), "sessions listed (full scan)");
+        Ok(sessions)
     }}
 impl DataManager {
     fn load_metadata(&self) -> Result<SessionMetadata> {
