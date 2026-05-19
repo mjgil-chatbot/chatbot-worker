@@ -332,6 +332,68 @@ fn claude_compat_runsc_mounts(
     }
     mounts
 }
+pub fn claude_compat_config(
+    provider: ModelProvider,
+    overrides: Option<&ProviderRequestOverrides>,
+) -> ClaudeCliConfig {
+    let entry = crate::provider_catalog::by_id(provider);
+    let config_dir = path_override(
+        overrides.and_then(|o| o.config_dir.as_ref()),
+        TEST_PROVIDER_CONFIG_DIR_ENV,
+        || claude_compat_default_config_dir(provider),
+    );
+
+    // Provider-specific directory setup hooks
+    if let Some(path) = config_dir.as_ref() {
+        if provider == ModelProvider::MiniMax {
+            ensure_minimax_layout(path);
+        }
+    }
+
+    let mut extra_env = Vec::new();
+    let api_key = provider_api_key(provider);
+    apply_anthropic_transport_overrides(
+        &mut extra_env,
+        overrides,
+        entry.base_url.map(str::to_string),
+        api_key.clone(),
+    );
+    if let Some(reasoning_effort) = config::effective_reasoning_effort_for_provider(provider) {
+        upsert_env_var(
+            &mut extra_env,
+            "ANTHROPIC_REASONING_EFFORT",
+            reasoning_effort,
+        );
+    }
+    let cli = resolve_cli_launch_path(&string_override(
+        overrides.and_then(|o| o.cli.as_ref()),
+        TEST_PROVIDER_CLI_ENV,
+        || entry.cli_binary.to_string(),
+    ));
+    push_cli_runtime_path_env(&mut extra_env, &cli);
+
+    ClaudeCliConfig {
+        cli,
+        model: entry.interactive_model.to_string(),
+        json_schema: overrides.and_then(|o| o.output_json_schema.clone()),
+        output_format: config::OUTPUT_FORMAT.to_string(),
+        skip_permissions: config::SKIP_PERMISSIONS,
+        verbose_output: config::VERBOSE_OUTPUT,
+        allow_api_billing: entry.base_url.is_some(),
+        config_dir,
+        require_mcp_servers: provider == ModelProvider::Claude,
+        extra_env,
+        runsc_image: optional_string_override(
+            overrides.and_then(|o| o.runsc_image.as_ref()),
+            "RUST_CHATBOT_BACKGROUND_RUNSC_IMAGE",
+        ), // Disabled fallback
+        runsc_workspace_includes: string_list_override(
+            overrides.and_then(|o| Some(&o.runsc_workspace_includes)),
+            BACKGROUND_RUNSC_WORKSPACE_INCLUDES_ENV,
+        ),
+        runsc_mounts: claude_compat_runsc_mounts(provider, overrides),
+    }
+}
 fn codex_runsc_mounts(overrides: Option<&ProviderRequestOverrides>) -> Vec<RunscMount> {
     let mut mounts = Vec::new();
     let codex_toml = resolved_codex_toml_path(overrides);
@@ -440,6 +502,22 @@ pub fn mcp_server_names(overrides: Option<&ProviderRequestOverrides>) -> Vec<Str
         .cloned()
         .collect()
 }
+fn provider_facing_claude_mcp_server_names(
+    provider: ModelProvider,
+    overrides: Option<&ProviderRequestOverrides>,
+) -> Vec<String> {
+    let Some(config_dir) = claude_compat_config(provider, overrides).config_dir else {
+        return Vec::new();
+    };
+    let Some(json) = load_mcp_json_value(&config_dir.join(".claude.json")) else {
+        return Vec::new();
+    };
+
+    json.get("mcpServers")
+        .and_then(|value| value.as_object())
+        .map(|servers| servers.keys().cloned().collect())
+        .unwrap_or_default()
+}
 fn configured_claude_family_has_mcp_servers(
     provider: ModelProvider,
     overrides: Option<&ProviderRequestOverrides>,
@@ -452,6 +530,18 @@ fn configured_claude_family_has_mcp_servers(
     configured_mcp_servers(&json, provider_mcp_profile(provider))
         .map(|servers| !filtered_mcp_servers(servers, overrides).is_empty())
         .unwrap_or(false)
+}
+fn visible_claude_family_mcp_server_names(
+    provider: ModelProvider,
+    overrides: Option<&ProviderRequestOverrides>,
+) -> Vec<String> {
+    let mut names = provider_facing_claude_mcp_server_names(provider, overrides);
+    if names.is_empty() && configured_claude_family_has_mcp_servers(provider, overrides) {
+        names.push(MCP_COORDINATOR_SERVER_NAME.to_string());
+    }
+    names.sort_unstable();
+    names.dedup();
+    names
 }
 pub fn qwen_cli_config(overrides: Option<&ProviderRequestOverrides>) -> QwenCodeCliConfig {
     let mcp_server_names = mcp_server_names(overrides);

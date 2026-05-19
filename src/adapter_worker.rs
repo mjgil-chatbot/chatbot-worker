@@ -23,11 +23,26 @@ use anyhow::Result;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command as TokioCommand;
 use tokio::time::{sleep, Duration};
+use crate::adapter_git_verifier::{
+    persist_failed_verification_artifacts, GitSideEffectGuard, RawJsonlCapture,
+};
 use crate::adapter_live_summary::LiveSummaryContext;
-use crate::adapter_transport::append_transport_error_log;
+use crate::adapter_tool_call_schema::ToolCallLiveUpdateTracker;
+use crate::adapter_transport::{
+    append_transport_error_log, configure_subprocess_group, drain_stderr, finish_stderr_task,
+    preferred_terminal_adapter_error_detail, should_retry_transport_error, signal_process_group,
+    terminal_adapter_error_message, transport_retry_notice, wait_for_child_exit,
+    wait_for_retry_backoff,
+};
+use crate::chatbot_worker_runtime::runsc_workspace_includes_for_request;
+use crate::companion_binary::{resolve_agent_adapter_cli, resolve_minimax_chatbot_adapter};
+use crate::config;
+use crate::memory::build_query_with_memory;
 use crate::model::ModelProvider;
-use crate::stream::append_event;
-use crate::stream::StreamEvent;
+use crate::provider_bridge::{
+    claude_compat_config, effective_provider_system_prompt, minimax_api_key,
+};
+use crate::stream::{append_event, events_path, StreamEvent};
 use crate::worker::WorkerRequest;
 /// Result from running an adapter-backed provider CLI.
 pub struct AdapterResult {
@@ -39,6 +54,326 @@ pub struct AdapterResult {
     pub summary: Option<crate::summary::JsonSummary>,
     /// Error message if the run failed.
     pub error: Option<String>,
+}
+/// Run agent-adapter-cli with the given request, streaming events to the spool.
+///
+/// Returns when the process completes (success or failure). On success, returns
+/// the final text output and any session ID. On failure, returns the error.
+///
+/// The caller is responsible for writing output.txt and result.json after this
+/// returns.
+pub async fn run_adapter(
+    request: &WorkerRequest,
+    stop_signal: Arc<AtomicBool>,
+) -> Result<AdapterResult> {
+    let model_provider = ModelProvider::from_alias(&request.provider);
+    let chat_request = match worker_request_to_chat_request(request) {
+        Ok(chat_request) => chat_request,
+        Err(err) => return Ok(adapter_failure(String::new(), None, err)),
+    };
+    let summary_context = LiveSummaryContext::new(model_provider, chat_request.model.clone());
+    let events = events_path(&request.worker_spool_dir());
+    let mut attempt = 0usize;
+
+    loop {
+        attempt += 1;
+        let result = run_adapter_attempt(
+            request,
+            Arc::clone(&stop_signal),
+            model_provider,
+            &chat_request,
+            &summary_context,
+            &events,
+        )
+        .await?;
+
+        let Some(error) = result.error.as_deref() else {
+            return Ok(result);
+        };
+        if !should_retry_transport_error(&result.output, error) {
+            return Ok(result);
+        }
+
+        log_transport_retry(
+            request,
+            &summary_context,
+            &events,
+            &transport_retry_notice(attempt, error),
+        );
+        if wait_for_retry_backoff(stop_signal.as_ref()).await {
+            return Ok(AdapterResult {
+                output: result.output,
+                session_id: result.session_id,
+                summary: None,
+                error: Some("Stopped by user".to_string()),
+            });
+        }
+    }
+}
+async fn run_adapter_attempt(
+    request: &WorkerRequest,
+    stop_signal: Arc<AtomicBool>,
+    model_provider: Option<ModelProvider>,
+    chat_request: &ChatRequest,
+    summary_context: &LiveSummaryContext,
+    events: &Path,
+) -> Result<AdapterResult> {
+    let uses_shared_tool_call_schema =
+        provider_uses_shared_tool_call_live_update_schema(model_provider);
+    let system_prompt = adapter_system_prompt(request);
+    let adapter_program = resolve_agent_adapter_cli();
+    let git_side_effect_guard = GitSideEffectGuard::prepare(&request.query, &chat_request.cwd)?;
+
+    let mut cmd = TokioCommand::new(&adapter_program);
+    cmd.arg("run");
+    cmd.arg("--provider")
+        .arg(provider_string(&chat_request.provider));
+    cmd.arg("--prompt").arg(&chat_request.prompt);
+    cmd.arg("--cwd")
+        .arg(chat_request.cwd.to_string_lossy().as_ref());
+
+    if let Some(timeout_ms) = chat_request.timeout_ms {
+        cmd.arg("--timeout").arg(timeout_ms.to_string());
+    }
+    if let Some(model) = &chat_request.model {
+        cmd.arg("--model").arg(model);
+    }
+    if let Some(system_prompt) = system_prompt.as_deref() {
+        cmd.arg("--system-prompt").arg(system_prompt);
+    }
+    if let Some(session_id) = external_session_id(&chat_request.resume) {
+        cmd.arg("--session-id").arg(session_id);
+        cmd.arg("--resume");
+    }
+
+    // Safe mode vs dangerous default
+    if chat_request.approval_policy.is_safe() {
+        cmd.arg("--safe");
+    }
+
+    // Pass allowed env vars (whitelist approach for API keys)
+    for (key, value) in &chat_request.env {
+        cmd.env(key, value);
+    }
+
+    // Pass sandbox directories (runsc workspace includes)
+    let sandbox_dirs = runsc_workspace_includes_for_request(request);
+    if provider_supports_sandbox_dirs(&chat_request.provider) && !sandbox_dirs.is_empty() {
+        cmd.arg("--sandbox-dirs").arg(sandbox_dirs.join(","));
+    }
+
+    // JSON output mode
+    cmd.arg("--json");
+
+    // Read stdout as JSONL and drain stderr concurrently so adapter/provider
+    // diagnostics cannot fill the pipe and leave the worker stuck in Running.
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    configure_subprocess_group(&mut cmd);
+
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(err) => {
+            return Ok(adapter_failure(
+                String::new(),
+                None,
+                anyhow::Error::new(err)
+                    .context(format!("failed to spawn {}", adapter_program.display())),
+            ));
+        }
+    };
+
+    let stdout = child.stdout.take().expect("stdout captured");
+    let stderr = child.stderr.take().expect("stderr captured");
+    let mut reader = BufReader::new(stdout).lines();
+    let stderr_task = tokio::spawn(async move { drain_stderr(stderr).await });
+
+    let mut output = String::new();
+    let mut session_id = None;
+    let mut error_message = None;
+    let mut stop_requested = false;
+    let mut completed_result = None;
+    let mut live_update_tracker = ToolCallLiveUpdateTracker::default();
+    let mut raw_adapter_events = RawJsonlCapture::default();
+    let mut raw_provider_events = RawJsonlCapture::default();
+
+    // Process output line by line
+    loop {
+        let line = tokio::select! {
+            line = reader.next_line() => line,
+            _ = wait_for_stop_signal(stop_signal.as_ref()) => {
+                stop_requested = true;
+                let _ = signal_process_group(child.id(), libc::SIGTERM);
+                break;
+            }
+        };
+
+        let Some(line) = (match line {
+            Ok(line) => line,
+            Err(err) => {
+                return Ok(adapter_failure(
+                    output,
+                    session_id,
+                    anyhow::Error::new(err).context("read stdout line"),
+                ));
+            }
+        }) else {
+            break;
+        };
+        raw_adapter_events.push_line(line.clone());
+
+        // Parse as AgentEvent
+        let event: AgentEvent = match serde_json::from_str(&line) {
+            Ok(e) => e,
+            Err(_) => {
+                // Not JSON — might be a progress indicator or warning; emit as log
+                eprintln!("[agent-adapter] {}", line);
+                continue;
+            }
+        };
+
+        // Map to StreamEvent and persist
+        let live_update = uses_shared_tool_call_schema
+            .then(|| live_update_tracker.track(&event))
+            .flatten();
+
+        if let Some(summary_line) =
+            summary_context.line_for_agent_event(&event, live_update.as_ref())
+        {
+            if let Err(err) = append_event(&events, &StreamEvent::live_summary(summary_line)) {
+                eprintln!("Failed to append live summary event: {}", err);
+            }
+        }
+
+        if let Some(stream_event) = agent_event_to_stream_event(&event, live_update) {
+            if let Err(err) = append_event(&events, &stream_event) {
+                eprintln!("Failed to append event: {}", err);
+            }
+        }
+
+        if let AgentEvent::RawProviderEvent { payload, .. } = &event {
+            if let Ok(serialized) = serde_json::to_string(payload) {
+                raw_provider_events.push_line(serialized);
+            }
+            error_message = preferred_terminal_adapter_error_detail(
+                error_message.as_deref(),
+                raw_provider_event_error_message(payload).as_deref(),
+            );
+        }
+
+        // Track accumulated output for TextDelta
+        if let AgentEvent::TextDelta { text, .. } = &event {
+            output.push_str(text);
+        }
+
+        // Extract session ID for resumption
+        if let AgentEvent::RunStarted {
+            external_session, ..
+        } = &event
+        {
+            if let Some(ExternalSessionRef { id, .. }) = external_session {
+                session_id = Some(id.clone());
+            }
+        }
+
+        // Handle terminal events
+        match &event {
+            AgentEvent::RunCompleted {
+                final_text,
+                external_session,
+            } => {
+                if let Some(text) = final_text {
+                    output = text.clone();
+                }
+                if let Some(ext) = external_session {
+                    session_id = Some(ext.id.clone());
+                }
+                completed_result = Some(AdapterResult {
+                    output: output.clone(),
+                    session_id: session_id.clone(),
+                    summary: None,
+                    error: None,
+                });
+                break;
+            }
+            AgentEvent::RunFailed { code: _, message } => {
+                error_message = preferred_terminal_adapter_error_detail(
+                    error_message.as_deref(),
+                    Some(message),
+                );
+            }
+            AgentEvent::RunCancelled => {
+                error_message = Some("Cancelled by user".to_string());
+            }
+            _ => {}
+        }
+    }
+
+    // Wait for child to exit
+    let status = match wait_for_child_exit(&mut child, stop_requested).await {
+        Ok(status) => status,
+        Err(err) => {
+            return Ok(adapter_failure(output, session_id, err));
+        }
+    };
+    let stderr_tail = finish_stderr_task(stderr_task).await;
+
+    // Check for signal stop first
+    if stop_signal.load(Ordering::Relaxed) {
+        return Ok(AdapterResult {
+            output,
+            session_id,
+            summary: None,
+            error: Some("Stopped by user".to_string()),
+        });
+    }
+
+    // Check exit status
+    if status.success() {
+        let mut result = completed_result.unwrap_or(AdapterResult {
+            output,
+            session_id,
+            summary: None,
+            error: None,
+        });
+        if let Some(guard) = git_side_effect_guard.as_ref() {
+            if let Err(err) = guard.verify_success(&result.output) {
+                let message = err.to_string();
+                let _ = append_event(
+                    &events,
+                    &StreamEvent::live_summary(
+                        summary_context
+                            .diagnostic_line(&format!("git verification failed | {message}")),
+                    ),
+                );
+                let _ = append_event(&events, &StreamEvent::error(message.clone()));
+                let _ = persist_failed_verification_artifacts(
+                    &request.worker_spool_dir(),
+                    &request.query,
+                    &chat_request.prompt,
+                    guard,
+                    &raw_adapter_events,
+                    &raw_provider_events,
+                );
+                result.error = Some(err.to_string());
+            }
+        }
+        Ok(result)
+    } else {
+        let stderr_detail = (!stderr_tail.trim().is_empty()).then_some(stderr_tail.as_str());
+        let preferred_error_detail =
+            preferred_terminal_adapter_error_detail(error_message.as_deref(), stderr_detail);
+        let error_text = terminal_adapter_error_message(
+            status.code(),
+            &output,
+            preferred_error_detail.as_deref(),
+        );
+        Ok(adapter_failure(
+            output,
+            session_id,
+            anyhow::anyhow!("{error_text}"),
+        ))
+    }
 }
 fn adapter_failure(
     output: String,
@@ -117,6 +452,94 @@ fn log_transport_retry(
         events,
         &StreamEvent::live_summary(summary_context.diagnostic_line(message)),
     );
+}
+/// Convert a WorkerRequest into a ChatRequest for agent-adapter-cli.
+fn worker_request_to_chat_request(req: &WorkerRequest) -> Result<ChatRequest> {
+    let provider = model_provider_to_provider_id(&req.provider)?;
+    let provider_for_chat = provider.clone();
+    let model_provider = ModelProvider::from_alias(&req.provider);
+
+    let cwd = req
+        .working_dir
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let prompt = build_query_with_memory(&req.query, req.memory_context.as_ref());
+    let mut chat = ChatRequest::new(prompt, cwd, provider_for_chat);
+
+    chat.model = req.model_override.clone();
+
+    // Handle resume session
+    if let Some(ref session_id) = req.resume_session_id {
+        chat.resume = ResumeMode::External(ExternalSessionRef {
+            id: session_id.clone(),
+            provider,
+        });
+    }
+
+    // Timeout
+    chat.timeout_ms = None; // Worker-level timeout handled by stop_signal
+
+    // Approval policy — use dangerous default (matches existing CLI behavior)
+    chat.approval_policy = ApprovalPolicy::DangerousDefault;
+
+    // Provider-specific adapter env is injected here when the native contract
+    // requires it (for example MiniMax's Claude-compatible auth/base URL).
+    chat.env = HashMap::new();
+
+    if model_provider == Some(ModelProvider::MiniMax) {
+        apply_minimax_native_contract(&mut chat)?;
+    }
+
+    Ok(chat)
+}
+fn apply_minimax_native_contract(chat: &mut ChatRequest) -> Result<()> {
+    let minimax_env = config::api_key_env_for(ModelProvider::MiniMax)
+        .expect("MiniMax catalog entry must define an api_key_env");
+    let auth_token = minimax_api_key().ok_or_else(|| {
+        anyhow::anyhow!(
+            "{} is not set. Export it or write the key to {} before using MiniMax.",
+            minimax_env,
+            config::minimax_api_key_path()
+        )
+    })?;
+
+    if chat.model.is_none() {
+        chat.model = config::interactive_model_for(ModelProvider::MiniMax).map(str::to_string);
+    }
+
+    if let Some(config_dir) = config::get_config_dir(ModelProvider::MiniMax).map(PathBuf::from) {
+        ensure_minimax_adapter_layout(&config_dir);
+        chat.env.insert(
+            "CLAUDE_CONFIG_DIR".to_string(),
+            config_dir.to_string_lossy().into_owned(),
+        );
+    }
+
+    chat.env.insert(
+        "AGENT_ADAPTER_MINIMAX_EXE".to_string(),
+        resolve_minimax_chatbot_adapter()
+            .to_string_lossy()
+            .into_owned(),
+    );
+    if let Some(base_url) = config::base_url_for(ModelProvider::MiniMax) {
+        chat.env
+            .insert("ANTHROPIC_BASE_URL".to_string(), base_url.to_string());
+    }
+    chat.env
+        .insert("ANTHROPIC_AUTH_TOKEN".to_string(), auth_token);
+    chat.env.insert(
+        "MINIMAX_API_KEY".to_string(),
+        chat.env["ANTHROPIC_AUTH_TOKEN"].clone(),
+    );
+    if let Some(reasoning_effort) =
+        config::effective_reasoning_effort_for_provider(ModelProvider::MiniMax)
+    {
+        chat.env
+            .insert("ANTHROPIC_REASONING_EFFORT".to_string(), reasoning_effort);
+    }
+
+    Ok(())
 }
 fn ensure_minimax_adapter_layout(path: &Path) {
     let _ = std::fs::create_dir_all(path);
@@ -279,6 +702,42 @@ fn agent_event_to_stream_event(
 }
 fn timestamp_now() -> i64 {
     chrono::Utc::now().timestamp_millis()
+}
+fn adapter_system_prompt(request: &WorkerRequest) -> Option<String> {
+    let provider = ModelProvider::from_alias(&request.provider)?;
+    let base_prompt = effective_provider_system_prompt(
+        provider,
+        request.system_prompt.as_deref(),
+        &request.query,
+        None,
+    );
+
+    match provider {
+        ModelProvider::Claude | ModelProvider::MiniMax => {
+            let config = claude_compat_config(provider, None);
+            let session = ProviderSession {
+                working_dir: request.working_dir.clone(),
+                claude_session_id: None,
+                glm_session_id: None,
+                minimax_session_id: request.resume_session_id.clone(),
+                qwen_session_id: None,
+                codex_session_id: None,
+                nemotron_session_id: None,
+                gemini_session_id: None,
+                openrouter_session_id: None,
+                omniforge_session_id: None,
+                kimi_session_id: None,
+                messages: Vec::new(),
+            };
+            effective_claude_system_prompt(
+                &config,
+                Some(&session),
+                base_prompt.as_deref(),
+                request.resume_session_id.is_some(),
+            )
+        }
+        _ => base_prompt,
+    }
 }
 impl WorkerRequest {
     /// Path to the worker spool directory for this chat_id.

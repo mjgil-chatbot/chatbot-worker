@@ -14,14 +14,26 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use crate::config;
 use crate::data::{session_log_snapshot, ChatMessage, ChatSession};
 use crate::model::ModelProvider;
 mod agentic;
 mod backend;
+mod manual;
+mod paths;
 mod retrieval_filters;
 use self::retrieval_filters::sanitize_memory_text;
 use self::retrieval_filters::sanitize_retrieved_memory_text;
 pub use self::backend::MemMachineStatus;
+pub use self::manual::{
+    build_query_with_memory, forget_manual_memory, format_retrieved_memory_preview,
+    invalidate_memory_doc_key, list_manual_memories, load_ingest_state, load_manual_memories,
+    remember_manual_memory, restore_memory_doc_key, save_ingest_state, save_manual_memories,
+};
+pub use self::paths::{
+    ensure_workspace_layout, memory_enabled, memory_root_dir, workspace_id_for_path,
+    workspace_memory_paths,
+};
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0001_0000_01b3;
 pub const MEMORY_DIR_NAME: &str = "memory";
