@@ -8,17 +8,22 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
+
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+
+use crate::memory::{build_query_with_memory, MemoryContext};
 use crate::provider_bridge::{kimi_cli_config, ProviderRequestOverrides};
 use crate::stream::StreamMessage;
 use crate::summary::{format_tool_input_preview, JsonSummary, ToolCallRecord};
 use crate::{config, worker};
+
 const BRIDGE_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const BRIDGE_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 const BRIDGE_CONNECT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const STDERR_TAIL_MAX_LINES: usize = 120;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct BridgeConfig {
     chat_id: String,
@@ -30,10 +35,12 @@ struct BridgeConfig {
     working_dir: Option<String>,
     extra_env: Vec<(String, String)>,
 }
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct BridgePromptRequest {
     prompt: String,
 }
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct BridgeStreamFrame {
     response: String,
@@ -42,6 +49,7 @@ struct BridgeStreamFrame {
     summary: Option<JsonSummary>,
     is_final: bool,
 }
+
 pub fn maybe_run_bridge_from_args(args: &[String]) -> bool {
     if args.len() == 3 && args[1] == "--kimi-bridge" {
         let path = PathBuf::from(&args[2]);
@@ -53,6 +61,40 @@ pub fn maybe_run_bridge_from_args(args: &[String]) -> bool {
     }
     false
 }
+
+pub fn call_kimi_bridge_stream(
+    chat_id: &str,
+    query: &str,
+    system_prompt: Option<&str>,
+    memory_context: Option<&MemoryContext>,
+    working_dir: Option<&str>,
+    resume_session_id: Option<&str>,
+    overrides: Option<&ProviderRequestOverrides>,
+    tx: mpsc::Sender<StreamMessage>,
+    stop_signal: Arc<AtomicBool>,
+) -> Result<()> {
+    let config = ensure_bridge(chat_id, working_dir, resume_session_id, overrides)?;
+    let mut stream = UnixStream::connect(&config.socket_path).with_context(|| {
+        format!(
+            "failed to connect to Kimi bridge socket {}",
+            config.socket_path.display()
+        )
+    })?;
+    stream
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .context("failed to set Kimi bridge read timeout")?;
+    let request = BridgePromptRequest {
+        prompt: build_bridge_prompt(system_prompt, query, memory_context),
+    };
+    write_json_line(&mut stream, &request).context("failed to send prompt to Kimi bridge")?;
+
+    let reader_stream = stream
+        .try_clone()
+        .context("failed to clone Kimi bridge stream")?;
+    let mut reader = BufReader::new(reader_stream);
+    forward_bridge_stream(&mut reader, &config.pid_path, tx, stop_signal)
+}
+
 fn forward_bridge_stream<R: BufRead>(
     reader: &mut R,
     pid_path: &Path,
@@ -97,6 +139,7 @@ fn forward_bridge_stream<R: BufRead>(
         }
     }
 }
+
 fn ensure_bridge(
     chat_id: &str,
     working_dir: Option<&str>,
@@ -118,6 +161,7 @@ fn ensure_bridge(
     wait_for_bridge(&config.socket_path)?;
     Ok(config)
 }
+
 fn bridge_config(
     chat_id: &str,
     working_dir: Option<&str>,
@@ -142,6 +186,7 @@ fn bridge_config(
         extra_env: kimi.extra_env,
     })
 }
+
 fn bridge_root_dir(chat_id: &str) -> PathBuf {
     let safe_name = worker::worker_dir(chat_id)
         .file_name()
@@ -151,17 +196,21 @@ fn bridge_root_dir(chat_id: &str) -> PathBuf {
         .join("kimi-bridges")
         .join(PathBuf::from(safe_name))
 }
+
 fn config_path(chat_id: &str) -> PathBuf {
     bridge_root_dir(chat_id).join("config.json")
 }
+
 fn bridge_is_live(socket_path: &Path) -> bool {
     UnixStream::connect(socket_path).is_ok()
 }
+
 fn cleanup_stale_bridge(config: &BridgeConfig) {
     terminate_bridge_process(&config.pid_path);
     let _ = fs::remove_file(&config.socket_path);
     let _ = fs::remove_file(&config.pid_path);
 }
+
 fn terminate_bridge_process(pid_path: &Path) {
     if let Some(pid) = fs::read_to_string(pid_path)
         .ok()
@@ -170,11 +219,13 @@ fn terminate_bridge_process(pid_path: &Path) {
         terminate_process_group(pid);
     }
 }
+
 fn terminate_process_group(pid: i32) {
     unsafe {
         libc::killpg(pid, libc::SIGTERM);
     }
 }
+
 fn spawn_bridge_process(chat_id: &str) -> Result<()> {
     let exe = std::env::current_exe().context("failed to resolve current executable")?;
     let cfg_path = config_path(chat_id);
@@ -197,6 +248,7 @@ fn spawn_bridge_process(chat_id: &str) -> Result<()> {
     });
     Ok(())
 }
+
 fn wait_for_bridge(socket_path: &Path) -> Result<()> {
     let start = Instant::now();
     while start.elapsed() < BRIDGE_CONNECT_TIMEOUT {
@@ -210,6 +262,7 @@ fn wait_for_bridge(socket_path: &Path) -> Result<()> {
         socket_path.display()
     );
 }
+
 fn run_bridge_from_config_path(path: &Path) -> Result<()> {
     let config: BridgeConfig = serde_json::from_slice(
         &fs::read(path).with_context(|| format!("failed to read {}", path.display()))?,
@@ -217,6 +270,7 @@ fn run_bridge_from_config_path(path: &Path) -> Result<()> {
     .with_context(|| format!("failed to parse {}", path.display()))?;
     run_bridge_service(config)
 }
+
 fn run_bridge_service(config: BridgeConfig) -> Result<()> {
     if let Some(parent) = config.socket_path.parent() {
         fs::create_dir_all(parent)?;
@@ -258,6 +312,7 @@ fn run_bridge_service(config: BridgeConfig) -> Result<()> {
     let _ = fs::remove_file(&config.pid_path);
     Ok(())
 }
+
 fn serve_bridge_client(
     wire: &mut KimiWireSession,
     config: &BridgeConfig,
@@ -287,6 +342,28 @@ fn serve_bridge_client(
         &mut writer,
     )
 }
+
+fn build_bridge_prompt(
+    system_prompt: Option<&str>,
+    query: &str,
+    memory_context: Option<&MemoryContext>,
+) -> String {
+    let mut sections = Vec::new();
+    if let Some(prompt) = system_prompt
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        sections.push(format!("System instructions:\n{prompt}"));
+    }
+    let effective_query = build_query_with_memory(query, memory_context);
+    if effective_query.contains('\n') {
+        sections.push(format!("User:\n{}", effective_query.trim()));
+    } else {
+        sections.push(format!("User: {}", effective_query.trim()));
+    }
+    sections.join("\n\n")
+}
+
 struct KimiWireSession {
     child: Child,
     stdin: ChildStdin,
@@ -294,6 +371,7 @@ struct KimiWireSession {
     stderr_tail: Arc<Mutex<VecDeque<String>>>,
     next_id: u64,
 }
+
 impl KimiWireSession {
     fn spawn(config: &BridgeConfig) -> Result<Self> {
         let mut cmd = Command::new(&config.cli);
@@ -368,8 +446,8 @@ impl KimiWireSession {
         };
         session.initialize()?;
         Ok(session)
-    }}
-impl KimiWireSession {
+    }
+
     fn initialize(&mut self) -> Result<()> {
         let id = self.next_request_id("initialize");
         self.write_rpc(json!({
@@ -397,8 +475,8 @@ impl KimiWireSession {
                 return Ok(());
             }
         }
-    }}
-impl KimiWireSession {
+    }
+
     fn run_prompt(
         &mut self,
         prompt: &str,
@@ -449,8 +527,8 @@ impl KimiWireSession {
                 return Ok(());
             }
         }
-    }}
-impl KimiWireSession {
+    }
+
     fn handle_request(&mut self, message: &Value) -> Result<()> {
         let Some(id) = message.get("id").and_then(|value| value.as_str()) else {
             return Ok(());
@@ -485,18 +563,18 @@ impl KimiWireSession {
             }
         }
         Ok(())
-    }}
-impl KimiWireSession {
+    }
+
     fn write_rpc(&mut self, value: Value) -> Result<()> {
         write_json_line(&mut self.stdin, &value).context("failed to write Kimi wire message")
-    }}
-impl KimiWireSession {
+    }
+
     fn next_request_id(&mut self, prefix: &str) -> String {
         let id = format!("{prefix}-{}", self.next_id);
         self.next_id += 1;
         id
-    }}
-impl KimiWireSession {
+    }
+
     fn bridge_timeout_error(&mut self) -> anyhow::Error {
         let stderr_tail = self
             .stderr_tail
@@ -515,7 +593,9 @@ impl KimiWireSession {
                 format!("\n\nRecent stderr output:\n{stderr_tail}")
             }
         )
-    }}
+    }
+}
+
 struct PromptState {
     model: Option<String>,
     response_content: String,
@@ -523,6 +603,7 @@ struct PromptState {
     tool_names: HashMap<String, String>,
     summary: JsonSummary,
 }
+
 impl PromptState {
     fn new(model: Option<String>) -> Self {
         let mut summary = JsonSummary::new();
@@ -534,8 +615,8 @@ impl PromptState {
             tool_names: HashMap::new(),
             summary,
         }
-    }}
-impl PromptState {
+    }
+
     fn handle_event(
         &mut self,
         params: &Value,
@@ -557,8 +638,8 @@ impl PromptState {
         };
         write_json_line(writer, &msg)?;
         Ok(())
-    }}
-impl PromptState {
+    }
+
     fn process_event(&mut self, event_type: &str, payload: &Value) {
         match event_type {
             "ContentPart" => {
@@ -648,8 +729,8 @@ impl PromptState {
             }
             _ => {}
         }
-    }}
-impl PromptState {
+    }
+
     fn response_view(&self) -> String {
         let summary = self.summary_lines.join("\n");
         match (
@@ -661,8 +742,8 @@ impl PromptState {
             (true, false) => self.response_content.clone(),
             (true, true) => String::new(),
         }
-    }}
-impl PromptState {
+    }
+
     fn final_message(&mut self, response: String, session_id: &str) -> BridgeStreamFrame {
         self.summary.response_count = 1;
         self.summary.session_id = Some(session_id.to_string());
@@ -673,7 +754,9 @@ impl PromptState {
             summary: Some(self.summary.clone()),
             is_final: true,
         }
-    }}
+    }
+}
+
 fn write_json_line<W: Write, T: Serialize>(writer: &mut W, value: &T) -> Result<()> {
     let mut bytes = serde_json::to_vec(value)?;
     bytes.push(b'\n');
@@ -681,12 +764,14 @@ fn write_json_line<W: Write, T: Serialize>(writer: &mut W, value: &T) -> Result<
     writer.flush()?;
     Ok(())
 }
+
 fn push_unique_line(lines: &mut Vec<String>, line: String) {
     if line.is_empty() || lines.last().is_some_and(|existing| existing == &line) {
         return;
     }
     lines.push(line);
 }
+
 fn extract_output_preview(value: &Value) -> Option<String> {
     match value {
         Value::String(text) => Some(truncate_preview(text)),
@@ -708,6 +793,7 @@ fn extract_output_preview(value: &Value) -> Option<String> {
         _ => None,
     }
 }
+
 fn format_tool_call_line(model: &Option<String>, tool_name: &str, arguments: &Value) -> String {
     let preview = format_tool_input_preview(tool_name, arguments);
     if preview.is_empty() {
@@ -721,6 +807,7 @@ fn format_tool_call_line(model: &Option<String>, tool_name: &str, arguments: &Va
         )
     }
 }
+
 fn format_tool_result_line(model: &Option<String>, tool_name: &str, output: &str) -> String {
     format!(
         "{} | {} -> {}",
@@ -729,6 +816,7 @@ fn format_tool_result_line(model: &Option<String>, tool_name: &str, output: &str
         truncate_preview(output)
     )
 }
+
 fn model_label(model: &Option<String>) -> &str {
     if model.as_deref().unwrap_or_default().is_empty() {
         "Kimi"
@@ -736,6 +824,7 @@ fn model_label(model: &Option<String>) -> &str {
         "Kimi"
     }
 }
+
 fn format_tool_name(name: &str) -> String {
     let formatted = name
         .chars()
@@ -752,10 +841,106 @@ fn format_tool_name(name: &str) -> String {
         .collect::<String>();
     formatted.trim().to_string()
 }
+
 fn truncate_preview(text: &str) -> String {
     const MAX_CHARS: usize = 80;
     if text.chars().count() <= MAX_CHARS {
         return text.to_string();
     }
     text.chars().take(MAX_CHARS - 3).collect::<String>() + "..."
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::net::UnixStream;
+    use std::os::unix::process::CommandExt;
+    use std::process::Command;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::mpsc;
+
+    #[test]
+    fn bridge_prompt_includes_system_prompt_and_memory() {
+        let memory = MemoryContext {
+            workspace_id: "ws".to_string(),
+            query: "fix".to_string(),
+            hits: vec![crate::memory::MemoryHit {
+                doc_key: "doc".to_string(),
+                chat_id: "chat".to_string(),
+                role: "assistant".to_string(),
+                session_name: "session".to_string(),
+                timestamp: chrono::Utc::now(),
+                snippet: "remember this".to_string(),
+                title: None,
+                message_index: None,
+                turn_index: None,
+                score: None,
+            }],
+        };
+        let prompt =
+            build_bridge_prompt(Some("Follow system rules."), "Inspect repo", Some(&memory));
+        assert!(prompt.contains("System instructions:\nFollow system rules."));
+        assert!(prompt.contains("Retrieved memory:"));
+        assert!(prompt.contains("User request:\nInspect repo"));
+    }
+
+    #[test]
+    fn subagent_tool_events_are_folded_into_live_summary() {
+        let mut state = PromptState::new(Some("kimi-code/kimi-for-coding".to_string()));
+        state.process_event(
+            "SubagentEvent",
+            &json!({
+                "event": {
+                    "type": "ToolCall",
+                    "payload": {
+                        "id": "tc-1",
+                        "function": {
+                            "name": "Shell",
+                            "arguments": "{\"command\":\"pwd\"}"
+                        }
+                    }
+                }
+            }),
+        );
+        assert!(state.response_view().contains("Kimi | Shell"));
+        assert_eq!(state.summary.tools_used, vec!["Shell".to_string()]);
+    }
+
+    #[test]
+    fn stop_signal_terminates_bridge_process_group() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let pid_path = temp.path().join("bridge.pid");
+        let mut child = unsafe {
+            Command::new("sleep")
+                .arg("120")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .pre_exec(|| {
+                    libc::setsid();
+                    Ok(())
+                })
+                .spawn()
+                .expect("spawn sleep")
+        };
+        std::fs::write(&pid_path, child.id().to_string()).expect("write pid");
+
+        let (stream_a, _stream_b) = UnixStream::pair().expect("unix stream pair");
+        stream_a
+            .set_read_timeout(Some(Duration::from_millis(50)))
+            .expect("set read timeout");
+        let mut reader = BufReader::new(stream_a);
+        let (tx, _rx) = mpsc::channel();
+        let stop_signal = Arc::new(AtomicBool::new(true));
+
+        let err = forward_bridge_stream(&mut reader, &pid_path, tx, stop_signal)
+            .expect_err("stop should abort bridge stream");
+        assert!(err.to_string().contains("stopped by user"));
+
+        let status = child.wait().expect("wait for terminated child");
+        assert!(
+            !status.success(),
+            "expected stop to terminate the bridge process group"
+        );
+    }
 }
