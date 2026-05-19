@@ -12,6 +12,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use crate::provider_bridge::{kimi_cli_config, ProviderRequestOverrides};
+use crate::stream::StreamMessage;
+use crate::summary::{format_tool_input_preview, JsonSummary, ToolCallRecord};
 use crate::{config, worker};
 const BRIDGE_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const BRIDGE_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
@@ -31,6 +33,58 @@ struct BridgeConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct BridgePromptRequest {
     prompt: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BridgeStreamFrame {
+    response: String,
+    command: String,
+    session_id: Option<String>,
+    summary: Option<JsonSummary>,
+    is_final: bool,
+}
+fn forward_bridge_stream<R: BufRead>(
+    reader: &mut R,
+    pid_path: &Path,
+    tx: mpsc::Sender<StreamMessage>,
+    stop_signal: Arc<AtomicBool>,
+) -> Result<()> {
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if stop_signal.load(Ordering::Acquire) {
+            terminate_bridge_process(pid_path);
+            bail!("stopped by user");
+        }
+        let read = match reader.read_line(&mut line) {
+            Ok(read) => read,
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                continue;
+            }
+            Err(err) => return Err(err).context("failed to read Kimi bridge response"),
+        };
+        if read == 0 {
+            bail!("Kimi bridge closed before sending a final response");
+        }
+        let msg: BridgeStreamFrame = serde_json::from_str(line.trim_end())
+            .context("failed to parse Kimi bridge stream message")?;
+        let is_final = msg.is_final;
+        tx.send(StreamMessage {
+            response: msg.response,
+            command: msg.command,
+            session_id: msg.session_id,
+            summary: msg.summary,
+            is_final,
+        })
+        .map_err(|_| anyhow!("Kimi bridge stream receiver was dropped"))?;
+        if is_final {
+            return Ok(());
+        }
+    }
 }
 fn ensure_bridge(
     chat_id: &str,
@@ -257,6 +311,58 @@ impl KimiWireSession {
         }
     }}
 impl KimiWireSession {
+    fn run_prompt(
+        &mut self,
+        prompt: &str,
+        session_id: &str,
+        model: &Option<String>,
+        writer: &mut UnixStream,
+    ) -> Result<()> {
+        let prompt_id = self.next_request_id("prompt");
+        self.write_rpc(json!({
+            "jsonrpc": "2.0",
+            "method": "prompt",
+            "id": prompt_id,
+            "params": { "user_input": prompt }
+        }))?;
+
+        let mut state = PromptState::new(model.clone());
+        loop {
+            let message = self
+                .stdout_rx
+                .recv_timeout(Duration::from_secs(300))
+                .map_err(|_| self.bridge_timeout_error())?;
+            if let Some(method) = message.get("method").and_then(|value| value.as_str()) {
+                match method {
+                    "event" => {
+                        state.handle_event(
+                            message.get("params").unwrap_or(&Value::Null),
+                            session_id,
+                            writer,
+                        )?;
+                    }
+                    "request" => {
+                        self.handle_request(&message)?;
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+
+            if message.get("id").and_then(|value| value.as_str()) == Some(prompt_id.as_str()) {
+                if let Some(error) = message.get("error") {
+                    let response = format!("Kimi command failed.\n\nWire error:\n{error}");
+                    let final_msg = state.final_message(response, session_id);
+                    write_json_line(writer, &final_msg)?;
+                    bail!("Kimi prompt failed: {}", error);
+                }
+                let final_msg = state.final_message(state.response_view(), session_id);
+                write_json_line(writer, &final_msg)?;
+                return Ok(());
+            }
+        }
+    }}
+impl KimiWireSession {
     fn handle_request(&mut self, message: &Value) -> Result<()> {
         let Some(id) = message.get("id").and_then(|value| value.as_str()) else {
             return Ok(());
@@ -322,6 +428,164 @@ impl KimiWireSession {
             }
         )
     }}
+struct PromptState {
+    model: Option<String>,
+    response_content: String,
+    summary_lines: Vec<String>,
+    tool_names: HashMap<String, String>,
+    summary: JsonSummary,
+}
+impl PromptState {
+    fn new(model: Option<String>) -> Self {
+        let mut summary = JsonSummary::new();
+        summary.model = model.clone();
+        Self {
+            model,
+            response_content: String::new(),
+            summary_lines: Vec::new(),
+            tool_names: HashMap::new(),
+            summary,
+        }
+    }}
+impl PromptState {
+    fn handle_event(
+        &mut self,
+        params: &Value,
+        session_id: &str,
+        writer: &mut UnixStream,
+    ) -> Result<()> {
+        let event_type = params
+            .get("type")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        let payload = params.get("payload").unwrap_or(&Value::Null);
+        self.process_event(event_type, payload);
+        let msg = BridgeStreamFrame {
+            response: self.response_view(),
+            command: "kimi --wire".to_string(),
+            session_id: Some(session_id.to_string()),
+            summary: Some(self.summary.clone()),
+            is_final: false,
+        };
+        write_json_line(writer, &msg)?;
+        Ok(())
+    }}
+impl PromptState {
+    fn process_event(&mut self, event_type: &str, payload: &Value) {
+        match event_type {
+            "ContentPart" => {
+                if payload.get("type").and_then(|value| value.as_str()) == Some("text") {
+                    if let Some(text) = payload.get("text").and_then(|value| value.as_str()) {
+                        self.response_content.push_str(text);
+                    }
+                }
+            }
+            "ToolCall" => {
+                let tool_name = payload
+                    .get("function")
+                    .and_then(|function| function.get("name"))
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("tool");
+                let arguments = payload
+                    .get("function")
+                    .and_then(|function| function.get("arguments"))
+                    .and_then(|value| value.as_str())
+                    .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                    .unwrap_or(Value::Null);
+                let line = format_tool_call_line(&self.model, tool_name, &arguments);
+                push_unique_line(&mut self.summary_lines, line);
+                if let Some(id) = payload.get("id").and_then(|value| value.as_str()) {
+                    self.tool_names
+                        .insert(id.to_string(), tool_name.to_string());
+                }
+                if !self.summary.tools_used.iter().any(|name| name == tool_name) {
+                    self.summary.tools_used.push(tool_name.to_string());
+                }
+                self.summary.pending_tool_calls.push(ToolCallRecord {
+                    name: tool_name.to_string(),
+                    input_preview: format_tool_input_preview(tool_name, &arguments),
+                    ..Default::default()
+                });
+            }
+            "ToolResult" => {
+                let tool_call_id = payload
+                    .get("tool_call_id")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default();
+                let tool_name = self
+                    .tool_names
+                    .get(tool_call_id)
+                    .cloned()
+                    .unwrap_or_else(|| "tool result".to_string());
+                let output_preview = payload
+                    .get("return_value")
+                    .and_then(|value| value.get("output"))
+                    .and_then(extract_output_preview);
+                if let Some(preview) = output_preview.filter(|value| !value.trim().is_empty()) {
+                    push_unique_line(
+                        &mut self.summary_lines,
+                        format_tool_result_line(&self.model, &tool_name, &preview),
+                    );
+                }
+            }
+            "StatusUpdate" => {
+                if let Some(token_usage) = payload.get("token_usage") {
+                    self.summary.total_input_tokens = token_usage
+                        .get("input_other")
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or(0);
+                    self.summary.total_output_tokens = token_usage
+                        .get("output")
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or(0);
+                    self.summary.cache_read_tokens = token_usage
+                        .get("input_cache_read")
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or(0);
+                    self.summary.cache_creation_tokens = token_usage
+                        .get("input_cache_creation")
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or(0);
+                }
+            }
+            "SubagentEvent" => {
+                if let Some(nested) = payload.get("event") {
+                    let nested_type = nested
+                        .get("type")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default();
+                    let nested_payload = nested.get("payload").unwrap_or(&Value::Null);
+                    self.process_event(nested_type, nested_payload);
+                }
+            }
+            _ => {}
+        }
+    }}
+impl PromptState {
+    fn response_view(&self) -> String {
+        let summary = self.summary_lines.join("\n");
+        match (
+            summary.trim().is_empty(),
+            self.response_content.trim().is_empty(),
+        ) {
+            (false, false) => format!("{summary}\n\n{}", self.response_content),
+            (false, true) => summary,
+            (true, false) => self.response_content.clone(),
+            (true, true) => String::new(),
+        }
+    }}
+impl PromptState {
+    fn final_message(&mut self, response: String, session_id: &str) -> BridgeStreamFrame {
+        self.summary.response_count = 1;
+        self.summary.session_id = Some(session_id.to_string());
+        BridgeStreamFrame {
+            response,
+            command: "kimi --wire".to_string(),
+            session_id: Some(session_id.to_string()),
+            summary: Some(self.summary.clone()),
+            is_final: true,
+        }
+    }}
 fn write_json_line<W: Write, T: Serialize>(writer: &mut W, value: &T) -> Result<()> {
     let mut bytes = serde_json::to_vec(value)?;
     bytes.push(b'\n');
@@ -354,6 +618,19 @@ fn extract_output_preview(value: &Value) -> Option<String> {
             (!text.is_empty()).then(|| truncate_preview(&text))
         }
         _ => None,
+    }
+}
+fn format_tool_call_line(model: &Option<String>, tool_name: &str, arguments: &Value) -> String {
+    let preview = format_tool_input_preview(tool_name, arguments);
+    if preview.is_empty() {
+        format!("{} | {}", model_label(model), format_tool_name(tool_name))
+    } else {
+        format!(
+            "{} | {} {}",
+            model_label(model),
+            format_tool_name(tool_name),
+            preview
+        )
     }
 }
 fn format_tool_result_line(model: &Option<String>, tool_name: &str, output: &str) -> String {
