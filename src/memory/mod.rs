@@ -15,6 +15,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use crate::data::{session_log_snapshot, ChatMessage, ChatSession};
+use crate::model::ModelProvider;
 mod agentic;
 mod backend;
 mod retrieval_filters;
@@ -393,6 +394,13 @@ fn message_turn_index(session: &ChatSession, message_index: usize) -> usize {
         .filter(|message| message.is_user)
         .count()
         .saturating_sub(1)
+}
+fn session_provider(session: &ChatSession) -> &'static str {
+    ModelProvider::ALL
+        .into_iter()
+        .find(|provider| provider.session_id_from_chat(session).is_some())
+        .map(|provider| provider.as_str())
+        .unwrap_or("unknown")
 }
 fn build_session_ingest_state(session: &ChatSession) -> SessionIngestState {
     SessionIngestState {

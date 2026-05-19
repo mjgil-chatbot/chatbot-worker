@@ -175,6 +175,79 @@ impl MemMachineClient {
         }
     }}
 impl MemMachineClient {
+    fn add_session_messages(
+        &self,
+        session: &ChatSession,
+        start_index: usize,
+        workspace_root: &Path,
+        final_state: Option<&str>,
+    ) -> Result<usize> {
+        let messages = session
+            .messages
+            .iter()
+            .enumerate()
+            .skip(start_index)
+            .map(|(message_index, message)| MemMachineMessage {
+                content: indexed_message_content(message),
+                producer: if message.is_user {
+                    "user".to_string()
+                } else {
+                    "assistant".to_string()
+                },
+                produced_for: "rust-chatbot".to_string(),
+                role: if message.is_user {
+                    "user".to_string()
+                } else {
+                    "assistant".to_string()
+                },
+                timestamp: message.timestamp.to_rfc3339(),
+                metadata: message_metadata(
+                    session,
+                    message,
+                    message_index,
+                    workspace_root,
+                    final_state,
+                ),
+            })
+            .collect::<Vec<_>>();
+
+        if messages.is_empty() {
+            return Ok(0);
+        }
+
+        let response = self
+            .client
+            .post(self.endpoint("memories"))
+            .timeout(MEMMACHINE_WRITE_TIMEOUT)
+            .json(&AddMemoriesPayload {
+                org_id: self.org_id.clone(),
+                project_id: self.project_id.clone(),
+                types: vec!["episodic"],
+                messages,
+            })
+            .send()
+            .with_context(|| format!("add messages to MemMachine project {}", self.project_id))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(response_error(
+                response,
+                format!("add messages to MemMachine project {}", self.project_id),
+                status,
+            ));
+        }
+
+        let added = response
+            .json::<AddMemoriesResponse>()
+            .context("decode MemMachine add-memories response")?;
+        for result in &added.results {
+            if result.uid.trim().is_empty() {
+                return Err(anyhow!("MemMachine returned an empty episode uid"));
+            }
+        }
+        Ok(added.results.len())
+    }}
+impl MemMachineClient {
     fn endpoint(&self, path: &str) -> String {
         format!("{}/api/v2/{path}", self.base_url)
     }}
@@ -183,6 +256,41 @@ fn workspace_description(paths: &WorkspaceMemoryPaths) -> String {
         "rust-chatbot workspace memory for {}",
         paths.workspace_root.display()
     )
+}
+fn message_metadata(
+    session: &ChatSession,
+    message: &ChatMessage,
+    message_index: usize,
+    workspace_root: &Path,
+    final_state: Option<&str>,
+) -> BTreeMap<String, String> {
+    let role = if message.is_user { "user" } else { "assistant" };
+    let mut metadata = BTreeMap::new();
+    metadata.insert(
+        "doc_key".to_string(),
+        format!("{}:{}:{}", session.id, message_index, role),
+    );
+    metadata.insert("chat_id".to_string(), session.id.clone());
+    metadata.insert(
+        "provider".to_string(),
+        session_provider(session).to_string(),
+    );
+    metadata.insert("role".to_string(), role.to_string());
+    metadata.insert("message_index".to_string(), message_index.to_string());
+    metadata.insert(
+        "turn_index".to_string(),
+        message_turn_index(session, message_index).to_string(),
+    );
+    metadata.insert("timestamp".to_string(), message.timestamp.to_rfc3339());
+    metadata.insert(
+        "workspace_path".to_string(),
+        workspace_root.to_string_lossy().into_owned(),
+    );
+    metadata.insert("session_name".to_string(), session.name.clone());
+    if let Some(final_state) = final_state {
+        metadata.insert("final_state".to_string(), final_state.to_string());
+    }
+    metadata
 }
 fn map_search_hits(response: SearchResponse) -> Vec<MemoryHit> {
     let Some(episodic_memory) = response.content.episodic_memory else {
