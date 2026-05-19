@@ -27,6 +27,36 @@ use std::sync::Arc;
 mod qwen_command;
 #[cfg(test)]
 pub(crate) use qwen_command::build_qwen_command;
+pub(super) fn resolve_task_provider(
+    provider_name: Option<&str>,
+    configured_default_provider: &str,
+) -> Option<ModelProvider> {
+    match provider_name {
+        Some(provider_name) => ModelProvider::from_supported_alias(provider_name),
+        None => Some(resolve_default_provider(configured_default_provider)),
+    }
+}
+fn resolve_default_provider(provider_name: &str) -> ModelProvider {
+    if let Some(provider) = ModelProvider::from_supported_alias(provider_name) {
+        provider
+    } else {
+        eprintln!(
+            "Invalid configured default provider '{}'. Falling back to codex.",
+            provider_name
+        );
+        ModelProvider::Codex
+    }
+}
+#[cfg(test)]
+fn override_cli_for_tests(cli: &mut String) {
+    if let Some(test_cli) =
+        std::env::var_os("RUST_CHATBOT_TEST_PROVIDER_CLI").filter(|value| !value.is_empty())
+    {
+        *cli = test_cli.to_string_lossy().into_owned();
+    }
+}
+#[cfg(not(test))]
+fn override_cli_for_tests(_cli: &mut String) {}
 pub(super) fn build_background_session(
     task: &BackgroundTask,
     provider: ModelProvider,
