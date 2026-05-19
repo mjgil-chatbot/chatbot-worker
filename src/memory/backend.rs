@@ -6,8 +6,10 @@ use rust_debug::tracing::warn;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
+
 const MEMMACHINE_READ_TIMEOUT: Duration = Duration::from_secs(10);
 const MEMMACHINE_WRITE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
 #[derive(Debug, Clone)]
 pub struct MemMachineStatus {
     pub base_url: String,
@@ -15,6 +17,7 @@ pub struct MemMachineStatus {
     pub project_id: String,
     pub project_exists: bool,
 }
+
 #[derive(Debug)]
 pub struct MemMachineClient {
     client: Client,
@@ -22,17 +25,20 @@ pub struct MemMachineClient {
     org_id: String,
     project_id: String,
 }
+
 #[derive(Debug, Serialize)]
 struct ProjectPayload<'a> {
     org_id: &'a str,
     project_id: &'a str,
 }
+
 #[derive(Debug, Serialize)]
 struct CreateProjectPayload<'a> {
     org_id: &'a str,
     project_id: &'a str,
     description: &'a str,
 }
+
 #[derive(Debug, Serialize)]
 struct SearchPayload<'a> {
     org_id: &'a str,
@@ -42,6 +48,7 @@ struct SearchPayload<'a> {
     types: [&'a str; 1],
     agent_mode: bool,
 }
+
 #[derive(Debug, Serialize)]
 struct AddMemoriesPayload {
     org_id: String,
@@ -49,6 +56,7 @@ struct AddMemoriesPayload {
     types: Vec<&'static str>,
     messages: Vec<MemMachineMessage>,
 }
+
 #[derive(Debug, Serialize)]
 struct MemMachineMessage {
     content: String,
@@ -58,36 +66,44 @@ struct MemMachineMessage {
     timestamp: String,
     metadata: BTreeMap<String, String>,
 }
+
 #[derive(Debug, Deserialize)]
 struct AddMemoriesResponse {
     results: Vec<AddMemoryResult>,
 }
+
 #[derive(Debug, Deserialize)]
 struct AddMemoryResult {
     uid: String,
 }
+
 #[derive(Debug, Deserialize)]
 struct SearchResponse {
     content: SearchResponseContent,
 }
+
 #[derive(Debug, Deserialize)]
 struct SearchResponseContent {
     #[serde(default)]
     episodic_memory: Option<EpisodicSearchResponse>,
 }
+
 #[derive(Debug, Deserialize)]
 struct EpisodicSearchResponse {
     long_term_memory: EpisodicMemoryBucket,
     short_term_memory: EpisodicShortTermBucket,
 }
+
 #[derive(Debug, Deserialize)]
 struct EpisodicMemoryBucket {
     episodes: Vec<EpisodicEpisode>,
 }
+
 #[derive(Debug, Deserialize)]
 struct EpisodicShortTermBucket {
     episodes: Vec<EpisodicEpisode>,
 }
+
 #[derive(Debug, Deserialize)]
 struct EpisodicEpisode {
     uid: String,
@@ -102,7 +118,42 @@ struct EpisodicEpisode {
     #[serde(default)]
     metadata: Option<BTreeMap<String, serde_json::Value>>,
 }
+
 impl MemMachineClient {
+    fn for_workspace(paths: &WorkspaceMemoryPaths) -> Result<Self> {
+        let client = Client::builder()
+            .build()
+            .context("build MemMachine HTTP client")?;
+        Ok(Self {
+            client,
+            base_url: config::memmachine_base_url(),
+            org_id: config::memmachine_org_id(),
+            project_id: paths.workspace_id.clone(),
+        })
+    }
+
+    fn status(paths: &WorkspaceMemoryPaths) -> Result<MemMachineStatus> {
+        let client = Self::for_workspace(paths)?;
+        let project_exists = match client.project_exists() {
+            Ok(exists) => exists,
+            Err(err) => {
+                warn!(
+                    error = %err,
+                    workspace_id = %paths.workspace_id,
+                    base_url = %client.base_url,
+                    "MemMachine status probe failed; reporting project as unavailable"
+                );
+                false
+            }
+        };
+        Ok(MemMachineStatus {
+            base_url: client.base_url,
+            org_id: client.org_id,
+            project_id: client.project_id,
+            project_exists,
+        })
+    }
+
     fn project_exists(&self) -> Result<bool> {
         let response = self
             .client
@@ -124,8 +175,8 @@ impl MemMachineClient {
                 status,
             )),
         }
-    }}
-impl MemMachineClient {
+    }
+
     fn ensure_project(&self, description: &str) -> Result<()> {
         if self.project_exists()? {
             return Ok(());
@@ -151,8 +202,8 @@ impl MemMachineClient {
                 status,
             )),
         }
-    }}
-impl MemMachineClient {
+    }
+
     fn delete_project(&self) -> Result<()> {
         let response = self
             .client
@@ -173,8 +224,43 @@ impl MemMachineClient {
                 status,
             )),
         }
-    }}
-impl MemMachineClient {
+    }
+
+    fn search(&self, query: &str) -> Result<Vec<MemoryHit>> {
+        if !self.project_exists()? {
+            return Ok(Vec::new());
+        }
+
+        let response = self
+            .client
+            .post(self.endpoint("memories/search"))
+            .timeout(MEMMACHINE_READ_TIMEOUT)
+            .json(&SearchPayload {
+                org_id: &self.org_id,
+                project_id: &self.project_id,
+                query,
+                top_k: config::workspace_memory_top_k(),
+                types: ["episodic"],
+                agent_mode: false,
+            })
+            .send()
+            .with_context(|| format!("search MemMachine project {}", self.project_id))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(response_error(
+                response,
+                format!("search MemMachine project {}", self.project_id),
+                status,
+            ));
+        }
+
+        let payload = response
+            .json::<SearchResponse>()
+            .context("decode MemMachine search response")?;
+        Ok(map_search_hits(payload))
+    }
+
     fn add_session_messages(
         &self,
         session: &ChatSession,
@@ -246,17 +332,116 @@ impl MemMachineClient {
             }
         }
         Ok(added.results.len())
-    }}
-impl MemMachineClient {
+    }
+
     fn endpoint(&self, path: &str) -> String {
         format!("{}/api/v2/{path}", self.base_url)
-    }}
+    }
+}
+
+pub(crate) fn memmachine_status(paths: &WorkspaceMemoryPaths) -> Result<MemMachineStatus> {
+    MemMachineClient::status(paths)
+}
+
+pub(crate) fn search_memmachine(
+    paths: &WorkspaceMemoryPaths,
+    query: &str,
+    invalidated_doc_keys: &HashSet<String>,
+) -> Result<Vec<MemoryHit>> {
+    let client = MemMachineClient::for_workspace(paths)?;
+    let hits = client.search(query)?;
+    Ok(hits
+        .into_iter()
+        .filter(|hit| !invalidated_doc_keys.contains(&hit.doc_key))
+        .collect())
+}
+
+pub(crate) fn rebuild_memmachine(
+    paths: &WorkspaceMemoryPaths,
+    sessions: &[&ChatSession],
+    final_state_overrides: &BTreeMap<String, String>,
+) -> Result<MemoryIndexSummary> {
+    let client = MemMachineClient::for_workspace(paths)?;
+    client.delete_project()?;
+    client.ensure_project(&workspace_description(paths))?;
+
+    let existing_state = load_ingest_state(&paths.ingest_state_path)?;
+    let mut state = existing_state;
+    let mut summary = MemoryIndexSummary {
+        rebuilt: true,
+        ..MemoryIndexSummary::default()
+    };
+
+    for session in sessions {
+        let indexed_messages = client.add_session_messages(
+            session,
+            0,
+            &paths.workspace_root,
+            final_state_overrides.get(&session.id).map(String::as_str),
+        )?;
+        summary.indexed_sessions += 1;
+        summary.indexed_messages += indexed_messages;
+        state
+            .sessions
+            .insert(session.id.clone(), build_session_ingest_state(session));
+    }
+
+    save_ingest_state(&paths.ingest_state_path, &state)?;
+    Ok(summary)
+}
+
+pub(crate) fn append_memmachine(
+    paths: &WorkspaceMemoryPaths,
+    sessions: &[&ChatSession],
+    mut state: IngestState,
+    final_state_overrides: &BTreeMap<String, String>,
+) -> Result<MemoryIndexSummary> {
+    let mut plans = Vec::new();
+    let mut summary = MemoryIndexSummary::default();
+
+    for session in sessions {
+        let indexed_message_count = state
+            .sessions
+            .get(session.id.as_str())
+            .map(|indexed| indexed.indexed_message_count)
+            .unwrap_or(0);
+        if indexed_message_count < session.messages.len() {
+            plans.push((*session, indexed_message_count));
+        }
+    }
+
+    if plans.is_empty() {
+        return Ok(summary);
+    }
+
+    let client = MemMachineClient::for_workspace(paths)?;
+    client.ensure_project(&workspace_description(paths))?;
+
+    for (session, start_index) in plans {
+        let indexed_messages = client.add_session_messages(
+            &session,
+            start_index,
+            &paths.workspace_root,
+            final_state_overrides.get(&session.id).map(String::as_str),
+        )?;
+        summary.indexed_sessions += 1;
+        summary.indexed_messages += indexed_messages;
+        state
+            .sessions
+            .insert(session.id.clone(), build_session_ingest_state(&session));
+    }
+
+    save_ingest_state(&paths.ingest_state_path, &state)?;
+    Ok(summary)
+}
+
 fn workspace_description(paths: &WorkspaceMemoryPaths) -> String {
     format!(
         "rust-chatbot workspace memory for {}",
         paths.workspace_root.display()
     )
 }
+
 fn message_metadata(
     session: &ChatSession,
     message: &ChatMessage,
@@ -292,6 +477,7 @@ fn message_metadata(
     }
     metadata
 }
+
 fn map_search_hits(response: SearchResponse) -> Vec<MemoryHit> {
     let Some(episodic_memory) = response.content.episodic_memory else {
         return Vec::new();
@@ -342,6 +528,7 @@ fn map_search_hits(response: SearchResponse) -> Vec<MemoryHit> {
     }
     out
 }
+
 fn metadata_string(metadata: &BTreeMap<String, serde_json::Value>, key: &str) -> Option<String> {
     metadata.get(key).and_then(|value| match value {
         serde_json::Value::Null => None,
@@ -351,6 +538,7 @@ fn metadata_string(metadata: &BTreeMap<String, serde_json::Value>, key: &str) ->
         other => Some(other.to_string()),
     })
 }
+
 fn response_error(response: Response, action: String, status: StatusCode) -> anyhow::Error {
     let body = response
         .text()
@@ -359,4 +547,13 @@ fn response_error(response: Response, action: String, status: StatusCode) -> any
         .filter(|text| !text.is_empty())
         .unwrap_or_else(|| "<empty response body>".to_string());
     anyhow!("{action} failed with HTTP {status}: {body}")
+}
+
+pub(crate) fn log_retrieval_failure(paths: &WorkspaceMemoryPaths, err: &anyhow::Error) {
+    warn!(
+        error = %err,
+        workspace_id = %paths.workspace_id,
+        base_url = %config::memmachine_base_url(),
+        "MemMachine retrieval failed; continuing with local manual memory only"
+    );
 }

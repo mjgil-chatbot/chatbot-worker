@@ -156,6 +156,10 @@ impl Default for ManualMemoriesState {
         }
     }
 }
+pub fn workspace_memmachine_status(workspace_path: impl AsRef<Path>) -> Result<MemMachineStatus> {
+    let paths = workspace_memory_paths(workspace_path)?;
+    backend::memmachine_status(&paths)
+}
 fn canonical_workspace_path(workspace_path: impl AsRef<Path>) -> Result<PathBuf> {
     workspace_path.as_ref().canonicalize().with_context(|| {
         format!(
@@ -193,6 +197,33 @@ fn default_memory_timestamp() -> DateTime<Utc> {
     Utc.timestamp_opt(0, 0)
         .single()
         .expect("unix epoch timestamp should be valid")
+}
+fn manual_memory_hits(manual_memories_path: &Path, query: &str) -> Result<Vec<MemoryHit>> {
+    let normalized_query = sanitize_memory_text(query).to_lowercase();
+    if normalized_query.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let query_terms = normalized_query
+        .split_whitespace()
+        .filter(|term| term.len() >= 2)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let mut hits = load_manual_memories(manual_memories_path)?
+        .memories
+        .into_values()
+        .filter_map(|memory| score_manual_memory(&memory, &normalized_query, &query_terms))
+        .collect::<Vec<_>>();
+
+    hits.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| right.timestamp.cmp(&left.timestamp))
+            .then_with(|| left.doc_key.cmp(&right.doc_key))
+    });
+    Ok(hits)
 }
 fn dedupe_memory_hits(hits: &mut Vec<MemoryHit>) {
     let mut seen = HashSet::new();
