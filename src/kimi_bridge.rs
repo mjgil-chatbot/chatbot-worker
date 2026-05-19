@@ -42,6 +42,17 @@ struct BridgeStreamFrame {
     summary: Option<JsonSummary>,
     is_final: bool,
 }
+pub fn maybe_run_bridge_from_args(args: &[String]) -> bool {
+    if args.len() == 3 && args[1] == "--kimi-bridge" {
+        let path = PathBuf::from(&args[2]);
+        if let Err(err) = run_bridge_from_config_path(&path) {
+            eprintln!("Kimi bridge failed: {err:#}");
+            std::process::exit(1);
+        }
+        return true;
+    }
+    false
+}
 fn forward_bridge_stream<R: BufRead>(
     reader: &mut R,
     pid_path: &Path,
@@ -198,6 +209,83 @@ fn wait_for_bridge(socket_path: &Path) -> Result<()> {
         "timed out waiting for Kimi bridge socket {}",
         socket_path.display()
     );
+}
+fn run_bridge_from_config_path(path: &Path) -> Result<()> {
+    let config: BridgeConfig = serde_json::from_slice(
+        &fs::read(path).with_context(|| format!("failed to read {}", path.display()))?,
+    )
+    .with_context(|| format!("failed to parse {}", path.display()))?;
+    run_bridge_service(config)
+}
+fn run_bridge_service(config: BridgeConfig) -> Result<()> {
+    if let Some(parent) = config.socket_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let _ = fs::remove_file(&config.socket_path);
+    let listener = UnixListener::bind(&config.socket_path).with_context(|| {
+        format!(
+            "failed to bind Kimi bridge socket {}",
+            config.socket_path.display()
+        )
+    })?;
+    listener
+        .set_nonblocking(true)
+        .context("failed to set Kimi bridge listener nonblocking")?;
+    fs::write(&config.pid_path, std::process::id().to_string())
+        .with_context(|| format!("failed to write {}", config.pid_path.display()))?;
+
+    let mut wire = KimiWireSession::spawn(&config)?;
+    let mut last_activity = Instant::now();
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                last_activity = Instant::now();
+                if let Err(err) = serve_bridge_client(&mut wire, &config, stream) {
+                    eprintln!("Kimi bridge client failed: {err:#}");
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                if last_activity.elapsed() >= BRIDGE_IDLE_TIMEOUT {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(err) => return Err(err).context("failed to accept Kimi bridge client"),
+        }
+    }
+
+    let _ = fs::remove_file(&config.socket_path);
+    let _ = fs::remove_file(&config.pid_path);
+    Ok(())
+}
+fn serve_bridge_client(
+    wire: &mut KimiWireSession,
+    config: &BridgeConfig,
+    stream: UnixStream,
+) -> Result<()> {
+    let request: BridgePromptRequest = {
+        let mut reader = BufReader::new(
+            stream
+                .try_clone()
+                .context("failed to clone bridge client stream")?,
+        );
+        let mut line = String::new();
+        let read = reader
+            .read_line(&mut line)
+            .context("failed to read bridge prompt request")?;
+        if read == 0 {
+            return Ok(());
+        }
+        serde_json::from_str(line.trim_end()).context("failed to parse bridge prompt request")?
+    };
+
+    let mut writer = stream;
+    wire.run_prompt(
+        &request.prompt,
+        &config.session_id,
+        &config.model,
+        &mut writer,
+    )
 }
 struct KimiWireSession {
     child: Child,
