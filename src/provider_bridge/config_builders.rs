@@ -22,6 +22,7 @@ fn apply_anthropic_transport_overrides(
         upsert_env_var(extra_env, "ANTHROPIC_AUTH_TOKEN", auth_token);
     }
 }
+
 fn push_runsc_mount(mounts: &mut Vec<RunscMount>, mount: RunscMount) {
     if !mount.host.exists() {
         return;
@@ -34,6 +35,7 @@ fn push_runsc_mount(mounts: &mut Vec<RunscMount>, mount: RunscMount) {
     }
     mounts.push(mount);
 }
+
 fn push_shared_runsc_mounts(mounts: &mut Vec<RunscMount>) {
     push_runsc_mount(
         mounts,
@@ -41,6 +43,7 @@ fn push_shared_runsc_mounts(mounts: &mut Vec<RunscMount>) {
     );
     push_runsc_mount(mounts, RunscMount::same_path(mcp_coordinator_binary_path()));
 }
+
 fn push_runsc_dirs_mounts(mounts: &mut Vec<RunscMount>, runsc_dirs: &[String]) {
     for dir in runsc_dirs {
         let path = PathBuf::from(dir);
@@ -49,6 +52,7 @@ fn push_runsc_dirs_mounts(mounts: &mut Vec<RunscMount>, runsc_dirs: &[String]) {
         }
     }
 }
+
 fn resolved_gemini_runsc_home_dir(
     session: Option<&ChatSession>,
     overrides: Option<&ProviderRequestOverrides>,
@@ -73,6 +77,7 @@ fn resolved_gemini_runsc_home_dir(
 
     shared_dir.or(settings_dir).or(legacy_dir)
 }
+
 const GEMINI_RUNSC_HOME_SIDECAR_FILES: &[&str] = &[
     "google_accounts.json",
     "installation_id",
@@ -82,6 +87,7 @@ const GEMINI_RUNSC_HOME_SIDECAR_FILES: &[&str] = &[
     "state.json",
     "trustedFolders.json",
 ];
+
 fn is_writable_dir(path: &Path) -> bool {
     if std::fs::create_dir_all(path).is_err() {
         return false;
@@ -100,6 +106,7 @@ fn is_writable_dir(path: &Path) -> bool {
         Err(_) => false,
     }
 }
+
 fn gemini_runsc_home_sidecar_path(source: &Path) -> Option<PathBuf> {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     std::hash::Hash::hash(&source.to_string_lossy(), &mut hasher);
@@ -118,6 +125,7 @@ fn gemini_runsc_home_sidecar_path(source: &Path) -> Option<PathBuf> {
 
     None
 }
+
 fn prepare_gemini_runsc_home_dir(
     session: Option<&ChatSession>,
     overrides: Option<&ProviderRequestOverrides>,
@@ -138,6 +146,7 @@ fn prepare_gemini_runsc_home_dir(
 
     Some(sidecar_dir)
 }
+
 fn output_schema_sidecar_path(schema: &str) -> PathBuf {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     std::hash::Hash::hash(&schema, &mut hasher);
@@ -146,6 +155,7 @@ fn output_schema_sidecar_path(schema: &str) -> PathBuf {
         .join("provider-bridge-output-schemas")
         .join(format!("{schema_hash:016x}.json"))
 }
+
 fn persist_output_schema_sidecar(schema: &str) -> Option<PathBuf> {
     let trimmed = schema.trim();
     if trimmed.is_empty() {
@@ -160,11 +170,13 @@ fn persist_output_schema_sidecar(schema: &str) -> Option<PathBuf> {
     }
     Some(path)
 }
+
 fn resolved_output_schema_path(overrides: Option<&ProviderRequestOverrides>) -> Option<PathBuf> {
     overrides
         .and_then(|overrides| overrides.output_json_schema.as_deref())
         .and_then(persist_output_schema_sidecar)
 }
+
 fn resolve_node_asdf_binary(binary: &str) -> Option<PathBuf> {
     let root = std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -193,6 +205,7 @@ fn resolve_node_asdf_binary(binary: &str) -> Option<PathBuf> {
     }
     newest.map(|(_, path)| path)
 }
+
 fn resolve_cli_launch_binary(command: &str) -> Option<PathBuf> {
     let trimmed = command.trim();
     if trimmed.is_empty() {
@@ -212,11 +225,13 @@ fn resolve_cli_launch_binary(command: &str) -> Option<PathBuf> {
         })
         .or_else(|| resolve_node_asdf_binary(trimmed))
 }
+
 pub(crate) fn resolve_cli_launch_path(command: &str) -> String {
     resolve_cli_launch_binary(command)
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_else(|| command.to_string())
 }
+
 fn resolved_cli_runtime_path(cli: &str) -> Option<std::ffi::OsString> {
     let Some(cli_dir) =
         resolve_cli_launch_binary(cli).and_then(|path| path.parent().map(Path::to_path_buf))
@@ -235,22 +250,28 @@ fn resolved_cli_runtime_path(cli: &str) -> Option<std::ffi::OsString> {
 
     std::env::join_paths(paths).ok()
 }
+
 pub fn apply_cli_runtime_env(command: &mut std::process::Command, cli: &str) {
     if let Some(joined) = resolved_cli_runtime_path(cli) {
         command.env("PATH", joined);
     }
 }
+
 fn push_cli_runtime_path_env(extra_env: &mut Vec<(String, String)>, cli: &str) {
     if let Some(joined) = resolved_cli_runtime_path(cli) {
         upsert_env_var(extra_env, "PATH", joined.to_string_lossy().into_owned());
     }
 }
+
+// ── Unified API key resolution from catalog ─────────────────────────
+
 fn read_api_key_file(path: impl AsRef<Path>) -> Option<String> {
     std::fs::read_to_string(path)
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
 }
+
 fn native_gemini_api_key() -> Option<String> {
     let legacy_dir = dirs::home_dir().map(|home| home.join(".gemini").join("api.key"));
     let config_dir = config::get_config_dir(ModelProvider::Gemini)
@@ -269,21 +290,25 @@ fn native_gemini_api_key() -> Option<String> {
 
     None
 }
+
 fn gemini_cli_fallback_api_key() -> Option<String> {
     std::env::var("GEMINI_API_KEY")
         .ok()
         .filter(|value| !value.trim().is_empty())
         .or_else(native_gemini_api_key)
 }
+
 fn native_gemini_oauth_creds_path() -> PathBuf {
     config::get_config_dir(ModelProvider::Gemini)
         .map(PathBuf::from)
         .unwrap_or_else(|| config::canonical_shared_root_dir().join(".gemini"))
         .join("oauth_creds.json")
 }
+
 pub(crate) fn gemini_subscription_auth_available() -> bool {
     native_gemini_oauth_creds_path().is_file()
 }
+
 fn provider_api_key(provider: ModelProvider) -> Option<String> {
     let entry = crate::provider_catalog::by_id(provider);
     if entry.api_key_env.is_empty() {
@@ -313,6 +338,9 @@ fn provider_api_key(provider: ModelProvider) -> Option<String> {
                 })
         })
 }
+
+// ── ClaudeCompat family (Claude, MiniMax) ───────────────────────────
+
 fn claude_compat_default_config_dir(provider: ModelProvider) -> Option<PathBuf> {
     match provider {
         ModelProvider::Claude => config::get_claude_config_dir().map(PathBuf::from),
@@ -320,6 +348,7 @@ fn claude_compat_default_config_dir(provider: ModelProvider) -> Option<PathBuf> 
         _ => None,
     }
 }
+
 fn claude_compat_runsc_mounts(
     _provider: ModelProvider,
     overrides: Option<&ProviderRequestOverrides>,
@@ -332,6 +361,7 @@ fn claude_compat_runsc_mounts(
     }
     mounts
 }
+
 pub fn claude_compat_config(
     provider: ModelProvider,
     overrides: Option<&ProviderRequestOverrides>,
@@ -394,6 +424,9 @@ pub fn claude_compat_config(
         runsc_mounts: claude_compat_runsc_mounts(provider, overrides),
     }
 }
+
+// ── CodexCompat family (Codex, Nvidia) ──────────────────────────────
+
 fn codex_runsc_mounts(overrides: Option<&ProviderRequestOverrides>) -> Vec<RunscMount> {
     let mut mounts = Vec::new();
     let codex_toml = resolved_codex_toml_path(overrides);
@@ -406,6 +439,7 @@ fn codex_runsc_mounts(overrides: Option<&ProviderRequestOverrides>) -> Vec<Runsc
     }
     mounts
 }
+
 fn ensure_codex_home_dir(overrides: Option<&ProviderRequestOverrides>) -> PathBuf {
     let codex_toml_path = resolved_codex_toml_path(overrides);
     let codex_home = codex_toml_path
@@ -415,6 +449,7 @@ fn ensure_codex_home_dir(overrides: Option<&ProviderRequestOverrides>) -> PathBu
     let _ = std::fs::create_dir_all(&codex_home);
     codex_home
 }
+
 pub fn codex_compat_config(
     provider: ModelProvider,
     overrides: Option<&ProviderRequestOverrides>,
@@ -473,6 +508,9 @@ pub fn codex_compat_config(
         runsc_mounts: codex_runsc_mounts(overrides),
     }
 }
+
+// ── GeminiCli family ────────────────────────────────────────────────
+
 fn gemini_runsc_mounts(
     session: Option<&ChatSession>,
     overrides: Option<&ProviderRequestOverrides>,
@@ -504,6 +542,7 @@ fn gemini_runsc_mounts(
     }
     mounts
 }
+
 pub fn gemini_cli_config(
     session: Option<&ChatSession>,
     overrides: Option<&ProviderRequestOverrides>,
@@ -539,6 +578,9 @@ pub fn gemini_cli_config(
         runsc_mounts: gemini_runsc_mounts(session, overrides),
     }
 }
+
+// ── QwenCli family ──────────────────────────────────────────────────
+
 fn qwen_runsc_mounts(overrides: Option<&ProviderRequestOverrides>) -> Vec<RunscMount> {
     let mut mounts = Vec::new();
     if let Some(runsc_dirs) = overrides.and_then(|o| Some(&o.runsc_dirs)).filter(|d| !d.is_empty()) {
@@ -546,6 +588,9 @@ fn qwen_runsc_mounts(overrides: Option<&ProviderRequestOverrides>) -> Vec<RunscM
     }
     mounts
 }
+
+// ── KimiCli family ──────────────────────────────────────────────────
+
 fn kimi_runsc_mounts(overrides: Option<&ProviderRequestOverrides>) -> Vec<RunscMount> {
     let mut mounts = Vec::new();
     if let Some(runsc_dirs) = overrides.and_then(|o| Some(&o.runsc_dirs)).filter(|d| !d.is_empty()) {
@@ -553,6 +598,7 @@ fn kimi_runsc_mounts(overrides: Option<&ProviderRequestOverrides>) -> Vec<RunscM
     }
     mounts
 }
+
 pub fn kimi_cli_config(
     overrides: Option<&ProviderRequestOverrides>,
 ) -> ai_providers::config::KimiCliConfig {
@@ -585,6 +631,7 @@ pub fn kimi_cli_config(
         runsc_mounts: kimi_runsc_mounts(overrides),
     }
 }
+
 pub fn mcp_server_names(overrides: Option<&ProviderRequestOverrides>) -> Vec<String> {
     let mcp_json = resolved_mcp_json_path(overrides);
     let Some(json) = load_mcp_json_value(&mcp_json) else {
@@ -595,6 +642,39 @@ pub fn mcp_server_names(overrides: Option<&ProviderRequestOverrides>) -> Vec<Str
         .cloned()
         .collect()
 }
+
+pub fn effective_mcp_server_names(
+    provider: ModelProvider,
+    overrides: Option<&ProviderRequestOverrides>,
+) -> Vec<String> {
+    let mcp_json = resolved_mcp_json_path(overrides);
+    let Some(json) = load_mcp_json_value(&mcp_json) else {
+        return Vec::new();
+    };
+    let adjusted_overrides = if provider == ModelProvider::Gemini
+        && overrides
+            .and_then(|overrides| overrides.runsc_image.as_ref())
+            .is_none()
+    {
+        gemini_cli_config(None, overrides)
+            .runsc_image
+            .filter(|image| !image.trim().is_empty())
+            .map(|runsc_image| {
+                let mut adjusted = overrides.cloned().unwrap_or_default();
+                adjusted.runsc_image = Some(runsc_image);
+                adjusted
+            })
+    } else {
+        None
+    };
+    let filtering_overrides = adjusted_overrides.as_ref().or(overrides);
+
+    filtered_profile_mcp_servers(&json, provider_mcp_profile(provider), filtering_overrides)
+        .keys()
+        .cloned()
+        .collect()
+}
+
 fn provider_facing_claude_mcp_server_names(
     provider: ModelProvider,
     overrides: Option<&ProviderRequestOverrides>,
@@ -611,6 +691,7 @@ fn provider_facing_claude_mcp_server_names(
         .map(|servers| servers.keys().cloned().collect())
         .unwrap_or_default()
 }
+
 fn configured_claude_family_has_mcp_servers(
     provider: ModelProvider,
     overrides: Option<&ProviderRequestOverrides>,
@@ -624,6 +705,7 @@ fn configured_claude_family_has_mcp_servers(
         .map(|servers| !filtered_mcp_servers(servers, overrides).is_empty())
         .unwrap_or(false)
 }
+
 fn visible_claude_family_mcp_server_names(
     provider: ModelProvider,
     overrides: Option<&ProviderRequestOverrides>,
@@ -636,6 +718,7 @@ fn visible_claude_family_mcp_server_names(
     names.dedup();
     names
 }
+
 pub fn qwen_cli_config(overrides: Option<&ProviderRequestOverrides>) -> QwenCodeCliConfig {
     let mcp_server_names = mcp_server_names(overrides);
     let cli = resolve_cli_launch_path(&config::qwen_code_cli_path());
@@ -664,9 +747,13 @@ pub fn qwen_cli_config(overrides: Option<&ProviderRequestOverrides>) -> QwenCode
         runsc_mounts: qwen_runsc_mounts(overrides),
     }
 }
+
+// ── Shared helpers ──────────────────────────────────────────────────
+
 fn ensure_repo_config_dir(path: &PathBuf) {
     let _ = std::fs::create_dir_all(path);
 }
+
 fn ensure_minimax_layout(path: &PathBuf) {
     ensure_repo_config_dir(path);
 
@@ -689,6 +776,9 @@ fn ensure_minimax_layout(path: &PathBuf) {
         }
     }
 }
+
+// ── Session / memory conversion ─────────────────────────────────────
+
 pub fn to_provider_session(session: Option<&ChatSession>) -> Option<ProviderSession> {
     let session = session?;
     Some(ProviderSession {
@@ -714,6 +804,7 @@ pub fn to_provider_session(session: Option<&ChatSession>) -> Option<ProviderSess
             .collect(),
     })
 }
+
 pub fn to_provider_memory_context(
     memory_context: Option<&MemoryContext>,
 ) -> Option<ProviderMemoryContext> {
@@ -739,10 +830,16 @@ pub fn to_provider_memory_context(
             .collect(),
     })
 }
+
+// ── Public API key helpers (for external call sites) ────────────────
+
 /// MiniMax API key from environment or key file.
 pub fn minimax_api_key() -> Option<String> {
     provider_api_key(ModelProvider::MiniMax)
 }
+
+// ── Transport-family dispatch ───────────────────────────────────────
+
 fn provider_config_with_overrides(
     provider: ModelProvider,
     session: Option<&ChatSession>,
