@@ -18,6 +18,7 @@ use crate::config;
 use crate::data::ChatSession;
 use crate::memory::MemoryContext;
 use crate::model::ModelProvider;
+use crate::stream::StreamMessage;
 use crate::workspace;
 use crate::AutonomousExecutionEnvironment;
 include!("overrides.rs");

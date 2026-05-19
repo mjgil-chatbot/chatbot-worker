@@ -743,3 +743,72 @@ pub fn to_provider_memory_context(
 pub fn minimax_api_key() -> Option<String> {
     provider_api_key(ModelProvider::MiniMax)
 }
+fn provider_config_with_overrides(
+    provider: ModelProvider,
+    session: Option<&ChatSession>,
+    overrides: Option<&ProviderRequestOverrides>,
+) -> ProviderConfig {
+    let entry = crate::provider_catalog::by_id(provider);
+    let model_override = overrides.and_then(|o| o.model.as_ref());
+
+    match entry.transport_family {
+        crate::provider_catalog::TransportFamily::ClaudeCompat => {
+            let mut config = claude_compat_config(provider, overrides);
+            if let Some(model) = model_override {
+                config.model = model.clone();
+            }
+            match provider {
+                ModelProvider::Claude => ProviderConfig::Claude(config),
+                ModelProvider::MiniMax => ProviderConfig::MiniMax(config),
+                _ => unreachable!("ClaudeCompat family does not include {:?}", provider),
+            }
+        }
+        crate::provider_catalog::TransportFamily::CodexCompat => {
+            let mut config = codex_compat_config(provider, overrides);
+            if let Some(model) = model_override {
+                config.model = Some(model.clone());
+            }
+            match provider {
+                ModelProvider::Codex => ProviderConfig::Codex(config),
+                // ai-providers still names this `Nemotron` internally; rust-chatbot surfaces it as Nvidia.
+                ModelProvider::Nvidia => ProviderConfig::Nemotron(config),
+                _ => unreachable!("CodexCompat family does not include {:?}", provider),
+            }
+        }
+        crate::provider_catalog::TransportFamily::GeminiCli => {
+            let mut config = gemini_cli_config(session, overrides);
+            if let Some(model) = model_override {
+                config.model = Some(model.clone());
+            }
+            ProviderConfig::Gemini(config)
+        }
+        crate::provider_catalog::TransportFamily::QwenCli => {
+            let mut config = qwen_cli_config(overrides);
+            if let Some(model) = model_override {
+                config.model = Some(model.clone());
+            }
+            ProviderConfig::Qwen(config)
+        }
+        crate::provider_catalog::TransportFamily::OpenRouterCompat => {
+            let mut config = openrouter_config(provider, overrides);
+            if let Some(model) = model_override {
+                config.model = model.clone();
+            }
+            ProviderConfig::OpenRouter(config)
+        }
+        crate::provider_catalog::TransportFamily::OpenRouterCliCompat => {
+            let mut config = openrouter_cli_config(provider, session, overrides);
+            if let Some(model) = model_override {
+                config.model = openrouter_cli_model_target(provider, model);
+            }
+            ProviderConfig::OpenRouterCli(config)
+        }
+        crate::provider_catalog::TransportFamily::KimiCli => {
+            let mut config = kimi_cli_config(overrides);
+            if let Some(model) = model_override {
+                config.model = Some(model.clone());
+            }
+            ProviderConfig::Kimi(config)
+        }
+    }
+}
