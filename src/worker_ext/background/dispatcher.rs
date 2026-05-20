@@ -3,12 +3,16 @@ use super::types::{
 };
 use std::sync::Arc;
 use tokio::sync::Mutex;
+
+use super::executor::provider_task_executor;
 use std::sync::atomic::AtomicBool;
+
 pub struct BackgroundDispatcher {
     pub max_concurrent: usize,
     pub tasks: Vec<BackgroundTask>,
     pub results: Arc<Mutex<Vec<BackgroundResult>>>,
 }
+
 impl BackgroundDispatcher {
     pub fn new(max_concurrent: usize) -> Self {
         Self {
@@ -20,12 +24,18 @@ impl BackgroundDispatcher {
             tasks: Vec::new(),
             results: Arc::new(Mutex::new(Vec::new())),
         }
-    }}
-impl BackgroundDispatcher {
+    }
+
     pub fn add_task(&mut self, task: BackgroundTask) {
         self.tasks.push(task);
-    }}
-impl BackgroundDispatcher {
+    }
+
+    /// Execute queued tasks with a bounded level of concurrency.
+    pub async fn run_all(&mut self) {
+        self.run_all_with_executor(provider_task_executor(Arc::new(AtomicBool::new(false))))
+            .await;
+    }
+
     /// Execute queued tasks with bounded concurrency via a tokio semaphore.
     /// Results are collected into `self.results`.
     pub async fn run_all_with_executor(&mut self, executor: Arc<BackgroundTaskExecutor>) {
@@ -56,8 +66,8 @@ impl BackgroundDispatcher {
         for handle in handles {
             let _ = handle.await;
         }
-    }}
-impl BackgroundDispatcher {
+    }
+
     /// Drain collected results and return a MergedResults summary.
     pub async fn take_merged(&self) -> MergedResults {
         let results = {
@@ -65,4 +75,5 @@ impl BackgroundDispatcher {
             std::mem::take(&mut *lock)
         };
         MergedResults::from_results(results)
-    }}
+    }
+}
