@@ -1,5 +1,6 @@
 use super::*;
 use agentic_memory::AgentMemoryKind;
+use agentic_memory::Consolidator;
 use agentic_memory::EpisodicTrace;
 use agentic_memory::EvidenceSource as AgentEvidenceSource;
 use agentic_memory::InMemoryAgentStore;
@@ -11,6 +12,31 @@ use std::collections::{BTreeSet, HashSet};
 const AGENT_MEMORY_MIN_SIMILARITY: f64 = 0.12;
 const AGENT_MEMORY_PACKET_ITEMS: usize = 4;
 const AGENT_MEMORY_ITEM_CHARS: usize = 220;
+pub(super) fn rebuild_agent_memory_store(
+    paths: &WorkspaceMemoryPaths,
+    sessions: &[&ChatSession],
+    final_state_overrides: &BTreeMap<String, String>,
+) -> Result<()> {
+    let mut store = InMemoryAgentStore::new();
+    let consolidator = Consolidator::default();
+
+    for session in sessions {
+        let final_state = final_state_overrides.get(&session.id).map(String::as_str);
+        for episode in session_episodes(paths, session, final_state) {
+            consolidator.consolidate(&mut store, episode);
+        }
+    }
+
+    store
+        .save_json(&paths.agent_memory_store_path)
+        .with_context(|| {
+            format!(
+                "save agent-memory store {}",
+                paths.agent_memory_store_path.display()
+            )
+        })?;
+    Ok(())
+}
 fn load_agent_memory_store(paths: &WorkspaceMemoryPaths) -> Result<Option<InMemoryAgentStore>> {
     if !paths.agent_memory_store_path.is_file() {
         return Ok(None);

@@ -156,6 +156,45 @@ impl Default for ManualMemoriesState {
         }
     }
 }
+pub fn index_workspace_sessions(
+    workspace_path: impl AsRef<Path>,
+    sessions: &[ChatSession],
+    final_state_overrides: &BTreeMap<String, String>,
+) -> Result<MemoryIndexSummary> {
+    if !memory_enabled() {
+        return Ok(MemoryIndexSummary::default());
+    }
+
+    let mut sessions: Vec<&ChatSession> = sessions.iter().collect();
+    if sessions.is_empty() {
+        return Ok(MemoryIndexSummary::default());
+    }
+    sessions.sort_by(|left, right| {
+        left.created_at
+            .cmp(&right.created_at)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+
+    let paths = ensure_workspace_layout(workspace_path)?;
+    let _writer_lock = acquire_writer_lock(&paths)?;
+    let state = load_ingest_state(&paths.ingest_state_path)?;
+    let summary = if should_rebuild_workspace(&sessions, &state) {
+        backend::rebuild_memmachine(&paths, &sessions, final_state_overrides)?
+    } else {
+        backend::append_memmachine(&paths, &sessions, state, final_state_overrides)?
+    };
+
+    if let Err(err) = agentic::rebuild_agent_memory_store(&paths, &sessions, final_state_overrides)
+    {
+        warn!(
+            error = %err,
+            workspace = %paths.workspace_root.display(),
+            "agent-memory rebuild failed; keeping MemMachine index intact"
+        );
+    }
+
+    Ok(summary)
+}
 pub fn workspace_memmachine_status(workspace_path: impl AsRef<Path>) -> Result<MemMachineStatus> {
     let paths = workspace_memory_paths(workspace_path)?;
     backend::memmachine_status(&paths)
