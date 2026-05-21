@@ -13,29 +13,42 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::RwLock;
+
 const EMBEDDED_PROVIDER_CAPABILITY_REGISTRY_JSON: &str =
     include_str!("../../workflow-registry/providers.json");
+
 /// Env var that pins the config path. When set, it is the exclusive search
 /// entry — the default shared-runtime-root `config.toml` and legacy repo-local paths are
 /// not consulted. Intended for the auto-ui test harness; production leaves it
 /// unset.
 pub const CONFIG_PATH_OVERRIDE_ENV: &str = "RUST_CHATBOT_CONFIG_PATH";
+
+// ─── Lazy config singleton ──────────────────────────────────────────────────
+
 static APP_CONFIG: once_cell::sync::Lazy<RwLock<AppConfig>> =
     once_cell::sync::Lazy::new(|| RwLock::new(AppConfig::load().0));
+
 fn load_config() -> AppConfig {
     APP_CONFIG.read().unwrap().clone()
 }
+
+// ─── Public entry point ─────────────────────────────────────────────────────
+
 /// Returns the fully-merged runtime application config, loaded from the first
 /// available TOML path.  Individual knobs are
 /// accessible as `CONFIG.provider.xxx`, `CONFIG.ui.xxx`, etc.
 pub fn config() -> AppConfig {
     load_config()
 }
+
 /// Reset the global config (useful in tests to exercise loading path logic).
 #[cfg(test)]
 pub(crate) fn reset_config() {
     *APP_CONFIG.write().unwrap() = AppConfig::load().0;
 }
+
+// ─── Top-level config ───────────────────────────────────────────────────────
+
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct AppConfig {
     #[serde(default)]
@@ -48,13 +61,14 @@ pub struct AppConfig {
     #[serde(alias = "coordination")]
     pub background: BackgroundTaskConfig,
 }
+
 impl AppConfig {
     /// Attempts to load config from the first available TOML path.
     /// Returns `(config, path_used)` — path is `None` if only defaults were used.
     fn load() -> (Self, Option<PathBuf>) {
         Self::load_from(Self::config_search_path().as_slice())
-    }}
-impl AppConfig {
+    }
+
     fn load_from(paths: &[PathBuf]) -> (Self, Option<PathBuf>) {
         for path in paths {
             if let Ok(loaded) = Self::from_toml_path(path) {
@@ -65,8 +79,8 @@ impl AppConfig {
         // (derived Default gives zero-value Rust defaults, not serde defaults)
         let default_config: Self = toml::from_str("").unwrap();
         (default_config, None)
-    }}
-impl AppConfig {
+    }
+
     fn from_toml_path(path: &PathBuf) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
         let raw: toml::Value = toml::from_str(&content)?;
@@ -80,8 +94,8 @@ impl AppConfig {
         let config: Self = raw.try_into()?;
         config.validate()?;
         Ok(config)
-    }}
-impl AppConfig {
+    }
+
     /// Returns the ordered list of paths to search for config files.
     /// `RUST_CHATBOT_CONFIG_PATH`, when set, is the exclusive search path —
     /// callers (especially test harnesses) opt out of the default lookup
@@ -93,8 +107,8 @@ impl AppConfig {
         let mut paths = vec![canonical_shared_root_dir().join("config.toml")];
         paths.extend(legacy_repo_config_paths("chatbot-config.toml"));
         paths
-    }}
-impl AppConfig {
+    }
+
     /// Validate loaded config fields; return an error with context on failure.
     fn validate(&self) -> anyhow::Result<()> {
         // Ensure providers.json is loadable if referenced (non-fatal — warn only)
@@ -102,12 +116,12 @@ impl AppConfig {
             eprintln!("[config] warning: could not load provider profiles: {}", e);
         }
         Ok(())
-    }}
-impl AppConfig {
+    }
+
     fn load_provider_registry(&self) -> anyhow::Result<ProviderCapabilityRegistry> {
         Self::load_provider_registry_from(&provider_registry_path())
-    }}
-impl AppConfig {
+    }
+
     fn load_provider_registry_from(
         path: &std::path::Path,
     ) -> anyhow::Result<ProviderCapabilityRegistry> {
@@ -118,24 +132,28 @@ impl AppConfig {
             }
             Err(err) => Err(err.into()),
         }
-    }}
-impl AppConfig {
+    }
+
     /// Load provider capability profiles from the checked-in provider registry.
     /// Falls back to the embedded checked-in registry when the file is missing.
     pub fn load_provider_profiles(
         &self,
     ) -> anyhow::Result<BTreeMap<String, ProviderCapabilityProfile>> {
         Ok(supported_provider_profiles(self.load_provider_registry()?))
-    }}
+    }
+}
+
 fn provider_registry_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("workflow-registry")
         .join("providers.json")
 }
+
 fn embedded_provider_registry() -> ProviderCapabilityRegistry {
     serde_json::from_str(EMBEDDED_PROVIDER_CAPABILITY_REGISTRY_JSON)
         .expect("embedded provider capability registry should be valid")
 }
+
 fn supported_provider_profiles(
     registry: ProviderCapabilityRegistry,
 ) -> BTreeMap<String, ProviderCapabilityProfile> {
@@ -152,6 +170,9 @@ fn supported_provider_profiles(
         })
         .collect()
 }
+
+// ─── Provider config ────────────────────────────────────────────────────────
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct ProviderConfig {
     /// Claude reasoning effort (e.g. "low", "medium", "high"). Defaults to "high".
@@ -189,6 +210,7 @@ pub struct ProviderConfig {
     #[serde(default)]
     pub max_concurrency: Option<usize>,
 }
+
 impl Default for ProviderConfig {
     fn default() -> Self {
         Self {
@@ -203,9 +225,13 @@ impl Default for ProviderConfig {
         }
     }
 }
+
 fn default_provider() -> String {
     "codex".to_string()
 }
+
+// ─── UI config ───────────────────────────────────────────────────────────────
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct UiConfig {
     #[serde(default = "default_window_width")]
@@ -229,6 +255,7 @@ pub struct UiConfig {
     #[serde(default = "default_message_max_width")]
     pub message_max_width: f32,
 }
+
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
@@ -242,6 +269,7 @@ impl Default for UiConfig {
         }
     }
 }
+
 fn default_window_width() -> f32 {
     1000.0
 }
@@ -263,6 +291,9 @@ fn default_side_panel_min_width() -> f32 {
 fn default_message_max_width() -> f32 {
     700.0
 }
+
+// ─── Memory config ───────────────────────────────────────────────────────────
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct MemoryConfig {
     /// Whether to enable workspace-scoped MemMachine retrieval.
@@ -285,6 +316,7 @@ pub struct MemoryConfig {
     #[serde(default)]
     pub memory_top_k: Option<usize>,
 }
+
 impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
@@ -295,9 +327,13 @@ impl Default for MemoryConfig {
         }
     }
 }
+
 fn default_enable_workspace_memory() -> bool {
     true
 }
+
+// ─── Background task config ─────────────────────────────────────────────────
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct BackgroundTaskConfig {
     /// Task lease duration in seconds.  Defaults to 30.
@@ -358,6 +394,7 @@ pub struct BackgroundTaskConfig {
     #[serde(default)]
     pub auto_prune_age_days: Option<u32>,
 }
+
 impl Default for BackgroundTaskConfig {
     fn default() -> Self {
         Self {
@@ -376,6 +413,7 @@ impl Default for BackgroundTaskConfig {
         }
     }
 }
+
 fn default_task_lease_secs() -> i64 {
     30
 }
@@ -403,14 +441,19 @@ fn default_background_design_doc_path() -> String {
 fn default_background_max_concurrent() -> usize {
     4
 }
+
 fn default_background_runsc_image() -> String {
     "rust-chatbot-autonomous-runsc:latest".to_string()
 }
+
+// ─── Provider capability profile (loaded from workflow-registry/providers.json)
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ProviderCapabilityRegistry {
     #[serde(default)]
     pub providers: Vec<ProviderCapabilityProfile>,
 }
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProviderCapabilityProfile {
     pub provider_id: String,
@@ -433,17 +476,20 @@ pub struct ProviderCapabilityProfile {
     #[serde(default)]
     pub notes: String,
 }
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum PromptFamily {
     Mechanics,
     Principles,
 }
+
 impl Default for PromptFamily {
     fn default() -> Self {
         PromptFamily::Principles
     }
 }
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
 pub enum CostTier {
@@ -452,14 +498,17 @@ pub enum CostTier {
     High,
     Premium,
 }
+
 impl Default for CostTier {
     fn default() -> Self {
         CostTier::Medium
     }
 }
+
 fn default_profile_max_concurrency() -> usize {
     4
 }
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskCategory {
@@ -473,37 +522,49 @@ pub enum TaskCategory {
     DocWrite,
     Research,
 }
+
+// ─── Compatibility accessor helpers ──────────────────────────────────────────
+// These delegate to the loaded runtime config, falling back to the original
+// hardcoded constant if no TOML file was found.
+
 /// Returns the loaded AppConfig, or defaults if no config file exists.
 pub fn app_config() -> AppConfig {
     load_config()
 }
+
 /// Provider knob: Claude reasoning effort.
 pub fn claude_reasoning_effort() -> Option<String> {
     load_config().provider.claude_reasoning_effort.clone()
 }
+
 /// Provider knob: Codex reasoning effort.
 pub fn codex_reasoning_effort() -> Option<String> {
     load_config().provider.codex_reasoning_effort.clone()
 }
+
 /// Provider knob: MiniMax reasoning effort.
 pub fn minimax_reasoning_effort() -> Option<String> {
     load_config().provider.minimax_reasoning_effort.clone()
 }
+
 /// Returns the effective Codex reasoning effort, falling back to the default
 /// constant when not explicitly configured.
 pub fn effective_codex_reasoning_effort() -> Option<String> {
     codex_reasoning_effort().or_else(|| CODEX_REASONING_EFFORT.map(str::to_string))
 }
+
 /// Returns the effective Claude reasoning effort, falling back to the default
 /// constant when not explicitly configured.
 pub fn effective_claude_reasoning_effort() -> Option<String> {
     claude_reasoning_effort().or_else(|| CLAUDE_REASONING_EFFORT.map(str::to_string))
 }
+
 /// Returns the effective MiniMax reasoning effort, falling back to the default
 /// constant when not explicitly configured.
 pub fn effective_minimax_reasoning_effort() -> Option<String> {
     minimax_reasoning_effort().or_else(|| MINIMAX_REASONING_EFFORT.map(str::to_string))
 }
+
 /// Returns the effective Codex-compat reasoning effort for a provider.
 pub fn effective_reasoning_effort_for_provider(
     provider: crate::model::ModelProvider,
@@ -519,19 +580,23 @@ pub fn effective_reasoning_effort_for_provider(
         _ => None,
     }
 }
+
 /// Provider knob: Codex sandbox mode.
 pub fn codex_sandbox_mode() -> Option<String> {
     load_config().provider.codex_sandbox_mode.clone()
 }
+
 /// Provider knob: Gemini approval mode.
 pub fn gemini_approval_mode() -> Option<String> {
     load_config().provider.gemini_approval_mode.clone()
 }
+
 /// Returns the effective Gemini approval mode, with a compile-time fallback to
 /// `GEMINI_APPROVAL_MODE`.
 pub fn effective_gemini_approval_mode() -> Option<String> {
     gemini_approval_mode().or_else(|| constants::GEMINI_APPROVAL_MODE.map(str::to_string))
 }
+
 /// Allow API billing (vs subscription-only).
 pub fn allow_api_billing() -> bool {
     load_config()
@@ -539,14 +604,17 @@ pub fn allow_api_billing() -> bool {
         .allow_api_billing
         .unwrap_or(ALLOW_API_BILLING)
 }
+
 /// Maximum concurrent provider calls.
 pub fn max_concurrency() -> usize {
     load_config().provider.max_concurrency.unwrap_or(4)
 }
+
 /// Whether workspace memory is enabled.
 pub fn enable_workspace_memory() -> bool {
     load_config().memory.enable_workspace_memory
 }
+
 pub fn memmachine_base_url() -> String {
     load_config()
         .memory
@@ -557,6 +625,7 @@ pub fn memmachine_base_url() -> String {
         .map(|value| value.trim_end_matches('/').to_string())
         .unwrap_or_else(|| "http://127.0.0.1:8080".to_string())
 }
+
 pub fn memmachine_org_id() -> String {
     load_config()
         .memory
@@ -567,43 +636,53 @@ pub fn memmachine_org_id() -> String {
         .map(str::to_string)
         .unwrap_or_else(|| "rust-chatbot".to_string())
 }
+
 pub fn workspace_memory_top_k() -> usize {
     load_config().memory.memory_top_k.unwrap_or(8)
 }
+
 /// Coordination: default task lease duration in seconds.
 pub fn task_lease_secs() -> i64 {
     load_config().background.task_lease_secs
 }
+
 /// Coordination: default max task attempts.
 pub fn task_max_attempts() -> u32 {
     load_config().background.task_max_attempts
 }
+
 /// Default max agents per background task batch.
 pub fn background_max_agents() -> u32 {
     load_config().background.max_agents
 }
+
 /// Default max iterations per background task batch.
 pub fn background_max_iterations() -> u32 {
     load_config().background.max_iterations
 }
+
 /// Returns the auto-prune age threshold from config, or `None` when
 /// auto-prune is disabled (the default).  When `Some(N)`, background task runs
 /// older than N days are automatically pruned on startup.
 pub fn auto_prune_age_days() -> Option<u32> {
     load_config().background.auto_prune_age_days
 }
+
 /// Whether write tasks are allowed by default for background workflows.
 pub fn background_allow_write_tasks() -> bool {
     load_config().background.allow_write_tasks
 }
+
 /// Whether review is required before applying edits.
 pub fn background_require_review_before_apply() -> bool {
     load_config().background.require_review_before_apply
 }
+
 /// Background dispatcher max concurrent tasks.
 pub fn background_max_concurrent() -> usize {
     load_config().background.background_max_concurrent
 }
+
 /// Default runsc container image for background provider calls.
 pub fn background_runsc_image() -> String {
     load_config()
@@ -612,6 +691,7 @@ pub fn background_runsc_image() -> String {
         .clone()
         .unwrap_or_else(default_background_runsc_image)
 }
+
 /// Load provider capability profiles from the checked-in provider registry.
 /// Falls back to the embedded checked-in registry when the file is missing.
 pub fn load_provider_profiles() -> BTreeMap<String, ProviderCapabilityProfile> {
@@ -619,10 +699,16 @@ pub fn load_provider_profiles() -> BTreeMap<String, ProviderCapabilityProfile> {
         .load_provider_profiles()
         .unwrap_or_else(|_| supported_provider_profiles(embedded_provider_registry()))
 }
+
 mod constants;
 mod paths;
+#[cfg(test)]
+mod tests;
+
 pub use constants::*;
 pub use paths::*;
+
+// Extra impl for testing — loads profiles from an arbitrary path
 impl AppConfig {
     #[cfg(test)]
     fn load_provider_profiles_from(
@@ -632,4 +718,5 @@ impl AppConfig {
         Ok(supported_provider_profiles(
             Self::load_provider_registry_from(path)?,
         ))
-    }}
+    }
+}
