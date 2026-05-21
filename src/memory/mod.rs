@@ -22,6 +22,8 @@ mod backend;
 mod manual;
 mod paths;
 mod retrieval_filters;
+#[cfg(test)]
+mod tests;
 use self::retrieval_filters::sanitize_memory_text;
 use self::retrieval_filters::sanitize_retrieved_memory_text;
 pub use self::backend::MemMachineStatus;
