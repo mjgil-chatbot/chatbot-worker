@@ -3,6 +3,7 @@ use std::io::Write as IoWrite;
 use tempfile::TempDir;
 mod catalog_compat;
 mod loading;
+mod misc;
 /// Shared crate-wide HOME/env mutex. Re-exported under the historic local
 /// name so existing call sites compile unchanged. A single mutex across all
 /// test modules is required: any module-local mutex would race with HOME
