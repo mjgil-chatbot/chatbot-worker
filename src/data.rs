@@ -9,19 +9,26 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
+
 use crate::model::ModelProvider;
 use crate::summary::{JsonSummary, TurnUsage};
+
 mod manager;
 mod provider_normalization;
+#[cfg(test)]
+mod tests;
+
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0001_0000_01b3;
 pub const SESSION_HEIGHT_CACHE_VERSION: u32 = 2;
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct SessionHeightCache {
     pub session_id: String,
     pub version: u32,
     pub widths: HashMap<u32, HeightCacheEntry>,
 }
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct HeightCacheEntry {
     pub row_heights: Vec<f32>,
@@ -29,6 +36,7 @@ pub struct HeightCacheEntry {
     pub message_count: usize,
     pub updated_at: DateTime<Utc>,
 }
+
 impl SessionHeightCache {
     pub fn new(session_id: String) -> Self {
         Self {
@@ -36,10 +44,13 @@ impl SessionHeightCache {
             version: SESSION_HEIGHT_CACHE_VERSION,
             widths: HashMap::new(),
         }
-    }}
+    }
+}
+
 pub fn height_cache_width_key(width: f32) -> u32 {
     width.round().max(0.0) as u32
 }
+
 pub fn resolve_height_cache_entry(
     cache: &SessionHeightCache,
     width_key: u32,
@@ -69,6 +80,7 @@ pub struct ChatMessage {
     #[serde(default)]
     pub retrieved_memory: Option<String>, // Retrieved memory preview shown alongside the turn
 }
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ChatSession {
     pub id: String,
@@ -109,10 +121,12 @@ pub struct ChatSession {
     pub updated_at: DateTime<Utc>,
     pub messages: Vec<ChatMessage>,
 }
+
 #[derive(Serialize, Deserialize, Default)]
 pub struct SessionMetadata {
     pub sessions: HashMap<String, SessionInfo>,
 }
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct SessionInfo {
     pub id: String,
@@ -123,6 +137,7 @@ pub struct SessionInfo {
     #[serde(default)]
     pub hidden: bool,
 }
+
 #[derive(Clone, Debug)]
 pub struct SessionLogSnapshot {
     pub total_messages: usize,
@@ -132,6 +147,7 @@ pub struct SessionLogSnapshot {
     pub last_message_at: Option<DateTime<Utc>>,
     pub history_fingerprint: u64,
 }
+
 pub fn session_log_snapshot(session: &ChatSession) -> SessionLogSnapshot {
     let user_messages = session.messages.iter().filter(|m| m.is_user).count();
     SessionLogSnapshot {
@@ -143,17 +159,21 @@ pub fn session_log_snapshot(session: &ChatSession) -> SessionLogSnapshot {
         history_fingerprint: session.history_fingerprint(),
     }
 }
+
 #[derive(Clone)]
 pub struct DataManager {
     data_dir: PathBuf,
     provider: ModelProvider,
 }
+
 struct MetadataLock(std::fs::File);
+
 impl Drop for MetadataLock {
     fn drop(&mut self) {
         let _ = self.0.unlock();
     }
 }
+
 impl ChatSession {
     pub fn add_message(&mut self, content: String, is_user: bool) {
         self.messages.push(ChatMessage {
@@ -164,8 +184,8 @@ impl ChatSession {
             retrieved_memory: None,
         });
         self.updated_at = Utc::now();
-    }}
-impl ChatSession {
+    }
+
     pub fn add_message_with_command(
         &mut self,
         content: String,
@@ -180,8 +200,8 @@ impl ChatSession {
             retrieved_memory: None,
         });
         self.updated_at = Utc::now();
-    }}
-impl ChatSession {
+    }
+
     /// Update the last assistant message content, or add a new assistant
     /// message if the last message is from the user (or there are no messages).
     pub fn update_or_add_assistant_message(&mut self, content: String) {
@@ -193,8 +213,8 @@ impl ChatSession {
             }
         }
         self.add_message(content, false);
-    }}
-impl ChatSession {
+    }
+
     pub fn update_user_message_request_metadata(
         &mut self,
         message_timestamp_ms: i64,
@@ -210,13 +230,13 @@ impl ChatSession {
         message.retrieved_memory = retrieved_memory;
         self.updated_at = Utc::now();
         Ok(())
-    }}
-impl ChatSession {
+    }
+
     pub fn set_system_prompt(&mut self, prompt: Option<String>) {
         self.system_prompt = prompt;
         self.updated_at = Utc::now();
-    }}
-impl ChatSession {
+    }
+
     pub fn history_fingerprint(&self) -> u64 {
         let mut hash = FNV_OFFSET_BASIS;
         hash = fnv_hash_bytes(hash, self.id.as_bytes());
@@ -264,7 +284,8 @@ impl ChatSession {
         }
 
         hash
-    }}
+    }
+}
 fn fnv_hash_bytes(mut hash: u64, bytes: &[u8]) -> u64 {
     for byte in bytes {
         hash ^= u64::from(*byte);
@@ -272,5 +293,6 @@ fn fnv_hash_bytes(mut hash: u64, bytes: &[u8]) -> u64 {
     }
     hash
 }
+
 #[cfg(test)]
 mod inline_tests;
