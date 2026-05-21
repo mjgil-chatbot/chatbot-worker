@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
 use agent_adapter_core::{
     AgentEvent, ApprovalPolicy, ChatRequest, ExternalSessionRef, ProviderId, ResumeMode,
 };
@@ -23,6 +24,7 @@ use anyhow::Result;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command as TokioCommand;
 use tokio::time::{sleep, Duration};
+
 use crate::adapter_git_verifier::{
     persist_failed_verification_artifacts, GitSideEffectGuard, RawJsonlCapture,
 };
@@ -44,6 +46,7 @@ use crate::provider_bridge::{
 };
 use crate::stream::{append_event, events_path, StreamEvent};
 use crate::worker::WorkerRequest;
+
 /// Result from running an adapter-backed provider CLI.
 pub struct AdapterResult {
     /// Final accumulated text output.
@@ -55,6 +58,7 @@ pub struct AdapterResult {
     /// Error message if the run failed.
     pub error: Option<String>,
 }
+
 /// Run agent-adapter-cli with the given request, streaming events to the spool.
 ///
 /// Returns when the process completes (success or failure). On success, returns
@@ -110,6 +114,7 @@ pub async fn run_adapter(
         }
     }
 }
+
 async fn run_adapter_attempt(
     request: &WorkerRequest,
     stop_signal: Arc<AtomicBool>,
@@ -375,6 +380,7 @@ async fn run_adapter_attempt(
         ))
     }
 }
+
 fn adapter_failure(
     output: String,
     session_id: Option<String>,
@@ -387,6 +393,7 @@ fn adapter_failure(
         error: Some(error.to_string()),
     }
 }
+
 fn raw_provider_event_error_message(payload: &serde_json::Value) -> Option<String> {
     let event_type = payload.get("type").and_then(|value| value.as_str());
     if event_type == Some("error") {
@@ -423,11 +430,13 @@ fn raw_provider_event_error_message(payload: &serde_json::Value) -> Option<Strin
 
     Some(message.to_string())
 }
+
 pub(crate) async fn wait_for_stop_signal(stop_signal: &AtomicBool) {
     while !stop_signal.load(Ordering::Relaxed) {
         sleep(Duration::from_millis(50)).await;
     }
 }
+
 fn log_transport_retry(
     request: &WorkerRequest,
     summary_context: &LiveSummaryContext,
@@ -453,6 +462,7 @@ fn log_transport_retry(
         &StreamEvent::live_summary(summary_context.diagnostic_line(message)),
     );
 }
+
 /// Convert a WorkerRequest into a ChatRequest for agent-adapter-cli.
 fn worker_request_to_chat_request(req: &WorkerRequest) -> Result<ChatRequest> {
     let provider = model_provider_to_provider_id(&req.provider)?;
@@ -493,6 +503,7 @@ fn worker_request_to_chat_request(req: &WorkerRequest) -> Result<ChatRequest> {
 
     Ok(chat)
 }
+
 fn apply_minimax_native_contract(chat: &mut ChatRequest) -> Result<()> {
     let minimax_env = config::api_key_env_for(ModelProvider::MiniMax)
         .expect("MiniMax catalog entry must define an api_key_env");
@@ -541,6 +552,7 @@ fn apply_minimax_native_contract(chat: &mut ChatRequest) -> Result<()> {
 
     Ok(())
 }
+
 fn ensure_minimax_adapter_layout(path: &Path) {
     let _ = std::fs::create_dir_all(path);
 
@@ -562,6 +574,7 @@ fn ensure_minimax_adapter_layout(path: &Path) {
         }
     }
 }
+
 /// Map ModelProvider string to agent-adapter ProviderId.
 fn model_provider_to_provider_id(provider: &str) -> Result<ProviderId> {
     let lower = provider.to_lowercase();
@@ -586,6 +599,7 @@ fn model_provider_to_provider_id(provider: &str) -> Result<ProviderId> {
         }
     }
 }
+
 /// Get provider string for CLI argument.
 fn provider_string(provider: &ProviderId) -> String {
     match provider {
@@ -601,12 +615,15 @@ fn provider_string(provider: &ProviderId) -> String {
         ProviderId::Custom(name) => name.clone(),
     }
 }
+
 fn provider_supports_sandbox_dirs(provider: &ProviderId) -> bool {
     !matches!(provider, ProviderId::Claude | ProviderId::MiniMax)
 }
+
 fn provider_uses_shared_tool_call_live_update_schema(provider: Option<ModelProvider>) -> bool {
     !matches!(provider, Some(ModelProvider::Forge | ModelProvider::Hermes))
 }
+
 /// Extract session ID from ResumeMode for --session-id flag.
 fn external_session_id(resume: &ResumeMode) -> Option<String> {
     match resume {
@@ -614,6 +631,7 @@ fn external_session_id(resume: &ResumeMode) -> Option<String> {
         _ => None,
     }
 }
+
 /// Map AgentEvent to StreamEvent for spool persistence.
 ///
 /// Not all AgentEvent variants have a corresponding StreamEvent — some are
@@ -700,9 +718,11 @@ fn agent_event_to_stream_event(
         _ => None,
     }
 }
+
 fn timestamp_now() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
+
 fn adapter_system_prompt(request: &WorkerRequest) -> Option<String> {
     let provider = ModelProvider::from_alias(&request.provider)?;
     let base_prompt = effective_provider_system_prompt(
@@ -739,17 +759,26 @@ fn adapter_system_prompt(request: &WorkerRequest) -> Option<String> {
         _ => base_prompt,
     }
 }
+
 impl WorkerRequest {
     /// Path to the worker spool directory for this chat_id.
     fn worker_spool_dir(&self) -> PathBuf {
         crate::worker::worker_dir(&self.chat_id)
-    }}
+    }
+}
+
+#[cfg(test)]
+#[path = "adapter_worker_tests.rs"]
+mod tests;
+
 #[cfg(test)]
 #[path = "adapter_worker_resume_tests.rs"]
 mod resume_tests;
+
 #[cfg(test)]
 #[path = "adapter_worker_spool_tests.rs"]
 mod spool_tests;
+
 #[cfg(test)]
 #[path = "adapter_worker_transport_retry_tests.rs"]
 mod transport_retry_tests;
