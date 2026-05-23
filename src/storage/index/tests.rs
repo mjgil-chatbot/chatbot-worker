@@ -4,6 +4,7 @@ use rusqlite::Connection;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::Path;
+
 fn write_session_fixture(root: &Path, session_id: &str, hidden: bool) -> Result<()> {
     let sessions_dir = root.join("sessions");
     fs::create_dir_all(&sessions_dir)?;
@@ -57,15 +58,19 @@ fn write_session_fixture(root: &Path, session_id: &str, hidden: bool) -> Result<
     )?;
     Ok(())
 }
+
 struct HomeGuard {
     previous: Option<OsString>,
 }
+
 impl HomeGuard {
     fn set(path: &Path) -> Self {
         let previous = std::env::var_os("HOME");
         std::env::set_var("HOME", path);
         Self { previous }
-    }}
+    }
+}
+
 impl Drop for HomeGuard {
     fn drop(&mut self) {
         match self.previous.as_ref() {
@@ -74,6 +79,7 @@ impl Drop for HomeGuard {
         }
     }
 }
+
 #[test]
 fn open_index_bootstraps_fresh_schema_with_workspace_columns() {
     let _lock = crate::TEST_ENV_LOCK
@@ -116,4 +122,59 @@ fn open_index_bootstraps_fresh_schema_with_workspace_columns() {
         .query_row("SELECT COUNT(*) FROM session_index", [], |row| row.get(0))
         .unwrap();
     assert_eq!(count, 0);
+}
+
+#[test]
+fn rebuild_session_index_preserves_hidden_flag_from_metadata() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_dir = temp.path().join("claude");
+    write_session_fixture(&data_dir, "session-hidden", true).unwrap();
+
+    let conn = Connection::open_in_memory().unwrap();
+    configure_connection(&conn).unwrap();
+    ensure_schema(&conn).unwrap();
+    rebuild_session_index(&conn, &data_dir, "claude").unwrap();
+
+    let hidden: bool = conn
+        .query_row(
+            "SELECT hidden FROM session_index WHERE session_id = ?1",
+            ["session-hidden"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        hidden,
+        "rebuild should preserve the soft-delete hidden flag"
+    );
+}
+
+#[test]
+fn rebuild_session_index_visible_session_is_not_hidden() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_dir = temp.path().join("claude");
+    write_session_fixture(&data_dir, "session-visible", false).unwrap();
+
+    let conn = Connection::open_in_memory().unwrap();
+    configure_connection(&conn).unwrap();
+    ensure_schema(&conn).unwrap();
+    rebuild_session_index(&conn, &data_dir, "claude").unwrap();
+
+    let hidden: bool = conn
+        .query_row(
+            "SELECT hidden FROM session_index WHERE session_id = ?1",
+            ["session-visible"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!hidden, "rebuild must not mark a visible session as hidden");
+}
+
+#[test]
+fn load_hidden_sessions_returns_empty_when_metadata_absent() {
+    let temp = tempfile::tempdir().unwrap();
+    let result = load_hidden_sessions(temp.path()).unwrap();
+    assert!(
+        result.is_empty(),
+        "missing sessions.json should produce an empty map, not an error"
+    );
 }
