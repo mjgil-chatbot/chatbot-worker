@@ -11,7 +11,10 @@
 mod layout;
 mod sync_shm;
 mod util;
+
 pub use layout::*;
+pub use sync_shm::*;
 pub use util::*;
+
 #[cfg(test)]
 mod tests;
