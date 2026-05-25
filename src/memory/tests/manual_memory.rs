@@ -2,6 +2,7 @@ use super::super::*;
 use super::{temp_path, MemTestGuard};
 use chrono::{TimeZone, Utc};
 use std::fs;
+
 #[test]
 fn manual_memories_round_trip_and_forget() {
     let _guard = MemTestGuard::new();
@@ -34,6 +35,7 @@ fn manual_memories_round_trip_and_forget() {
 
     let _ = fs::remove_dir_all(workspace);
 }
+
 #[test]
 fn remember_manual_memory_rejects_empty_text() {
     let _guard = MemTestGuard::new();
@@ -49,6 +51,7 @@ fn remember_manual_memory_rejects_empty_text() {
 
     let _ = fs::remove_dir_all(workspace);
 }
+
 #[test]
 fn forget_manual_memory_rejects_empty_id() {
     let workspace = temp_path("forget-empty-id");
@@ -63,6 +66,7 @@ fn forget_manual_memory_rejects_empty_id() {
 
     let _ = fs::remove_dir_all(workspace);
 }
+
 #[test]
 fn forget_manual_memory_nonexistent_returns_false() {
     let workspace = temp_path("forget-nonexist");
@@ -73,6 +77,7 @@ fn forget_manual_memory_nonexistent_returns_false() {
 
     let _ = fs::remove_dir_all(workspace);
 }
+
 #[test]
 fn remember_manual_memory_updates_existing_with_same_text() {
     let _guard = MemTestGuard::new();
@@ -104,6 +109,7 @@ fn remember_manual_memory_updates_existing_with_same_text() {
 
     let _ = fs::remove_dir_all(workspace);
 }
+
 #[test]
 fn invalidate_memory_doc_key_rejects_empty() {
     let _guard = MemTestGuard::new();
@@ -119,6 +125,7 @@ fn invalidate_memory_doc_key_rejects_empty() {
 
     let _ = fs::remove_dir_all(workspace);
 }
+
 #[test]
 fn invalidate_memory_doc_key_returns_false_on_duplicate() {
     let _guard = MemTestGuard::new();
@@ -136,6 +143,7 @@ fn invalidate_memory_doc_key_returns_false_on_duplicate() {
 
     let _ = fs::remove_dir_all(workspace);
 }
+
 #[test]
 fn restore_memory_doc_key_rejects_empty() {
     let _guard = MemTestGuard::new();
@@ -148,6 +156,7 @@ fn restore_memory_doc_key_rejects_empty() {
 
     let _ = fs::remove_dir_all(workspace);
 }
+
 #[test]
 fn restore_memory_doc_key_nonexistent_returns_false() {
     let _guard = MemTestGuard::new();
@@ -159,6 +168,7 @@ fn restore_memory_doc_key_nonexistent_returns_false() {
 
     let _ = fs::remove_dir_all(workspace);
 }
+
 #[test]
 fn score_manual_memory_returns_none_for_no_term_match() {
     let _guard = MemTestGuard::new();
@@ -176,6 +186,7 @@ fn score_manual_memory_returns_none_for_no_term_match() {
     );
     assert!(result.is_none());
 }
+
 #[test]
 fn score_manual_memory_full_query_match_scores_higher() {
     let _guard = MemTestGuard::new();
@@ -197,6 +208,7 @@ fn score_manual_memory_full_query_match_scores_higher() {
     // Full query match gets +100 bonus
     assert!(full_hit.unwrap().score.unwrap() > partial_hit.unwrap().score.unwrap());
 }
+
 #[test]
 fn score_manual_memory_high_priority_boost() {
     let _guard = MemTestGuard::new();
@@ -219,6 +231,7 @@ fn score_manual_memory_high_priority_boost() {
     let normal_hit = score_manual_memory(&normal, "api key", &terms).unwrap();
     assert!(high_hit.score.unwrap() > normal_hit.score.unwrap());
 }
+
 #[test]
 fn manual_memory_hits_filters_short_query_terms() {
     let _guard = MemTestGuard::new();
@@ -253,6 +266,7 @@ fn manual_memory_hits_filters_short_query_terms() {
 
     let _ = fs::remove_dir_all(workspace);
 }
+
 #[test]
 fn score_manual_memory_partial_term_match_no_full_query() {
     let _guard = MemTestGuard::new();
@@ -274,6 +288,7 @@ fn score_manual_memory_partial_term_match_no_full_query() {
     // Without full query match, score should be lower (no +100 bonus)
     assert!(hit.score.unwrap() < 100.0);
 }
+
 #[test]
 fn manual_memory_priority_serde_round_trip() {
     for (priority, expected_json) in [
@@ -286,11 +301,13 @@ fn manual_memory_priority_serde_round_trip() {
         assert_eq!(decoded, priority);
     }
 }
+
 #[test]
 fn manual_memory_priority_default_is_high() {
     let priority: ManualMemoryPriority = Default::default();
     assert_eq!(priority, ManualMemoryPriority::High);
 }
+
 #[test]
 fn manual_memories_state_serialization_round_trip() {
     let mut state = ManualMemoriesState::default();
@@ -310,33 +327,39 @@ fn manual_memories_state_serialization_round_trip() {
     assert_eq!(parsed.memories.len(), 1);
     assert_eq!(parsed.memories.get("id-1").unwrap().text, "Remember this");
 }
+
 #[test]
 fn manual_memory_priority_labels() {
     assert_eq!(ManualMemoryPriority::High.label(), "high");
     assert_eq!(ManualMemoryPriority::Normal.label(), "normal");
 }
+
 #[test]
 fn manual_memory_priority_boost_values() {
     assert!(ManualMemoryPriority::High.boost() > 0.0);
     assert_eq!(ManualMemoryPriority::Normal.boost(), 0.0);
 }
+
 #[test]
 fn manual_memory_priority_ordering() {
     // Normal < High for sorting
     assert!(ManualMemoryPriority::Normal < ManualMemoryPriority::High);
 }
+
 #[test]
 fn manual_memories_state_default_version_is_one() {
     let state = ManualMemoriesState::default();
     assert_eq!(state.version, 1);
     assert!(state.memories.is_empty());
 }
+
 #[test]
 fn load_manual_memories_missing_file_returns_default() {
     let path = temp_path("missing-manual-mem").join("manual-memories.json");
     let state = load_manual_memories(&path).unwrap();
     assert_eq!(state, ManualMemoriesState::default());
 }
+
 #[test]
 fn load_manual_memories_corrupt_json_errors() {
     let dir = temp_path("corrupt-manual");
@@ -349,6 +372,7 @@ fn load_manual_memories_corrupt_json_errors() {
 
     let _ = fs::remove_dir_all(dir);
 }
+
 #[test]
 fn save_manual_memories_populated_round_trip() {
     let dir = temp_path("manual-pop-rt");
@@ -388,6 +412,7 @@ fn save_manual_memories_populated_round_trip() {
 
     let _ = fs::remove_dir_all(dir);
 }
+
 #[test]
 fn invalidate_memory_doc_key_normalizes_reason() {
     let _guard = MemTestGuard::new();
@@ -415,6 +440,7 @@ fn invalidate_memory_doc_key_normalizes_reason() {
 
     let _ = fs::remove_dir_all(workspace);
 }
+
 #[test]
 fn invalidate_memory_doc_key_empty_reason_becomes_none() {
     let _guard = MemTestGuard::new();
@@ -434,6 +460,7 @@ fn invalidate_memory_doc_key_empty_reason_becomes_none() {
 
     let _ = fs::remove_dir_all(workspace);
 }
+
 #[test]
 fn manual_memories_state_preserves_version_on_round_trip() {
     let json = r#"{"version":1,"memories":{}}"#;
@@ -441,6 +468,7 @@ fn manual_memories_state_preserves_version_on_round_trip() {
     assert_eq!(state.version, 1);
     assert!(state.memories.is_empty());
 }
+
 #[test]
 fn memory_invalidation_reason_skipped_when_none() {
     let _guard = MemTestGuard::new();
@@ -451,6 +479,35 @@ fn memory_invalidation_reason_skipped_when_none() {
     let json = serde_json::to_string(&inv).unwrap();
     assert!(!json.contains("reason"));
 }
+
+#[test]
+fn retrieve_memory_context_filters_invalidated_manual_memories() {
+    let _guard = MemTestGuard::new();
+    let workspace = temp_path("invalidate-manual");
+    fs::create_dir_all(&workspace).unwrap();
+    ensure_workspace_layout(&workspace).unwrap();
+
+    let fact = remember_manual_memory(
+        &workspace,
+        "The secret key for invalidation test is XYZZY",
+        ManualMemoryPriority::High,
+    )
+    .unwrap();
+
+    // Invalidate the manual memory's doc_key
+    let doc_key = format!("manual:{}", fact.id);
+    invalidate_memory_doc_key(&workspace, &doc_key, None).unwrap();
+
+    // Should no longer appear in retrieval
+    let result = retrieve_memory_context(&workspace, "secret key invalidation").unwrap();
+    assert!(
+        result.is_none(),
+        "invalidated manual memory should not appear in results"
+    );
+
+    let _ = fs::remove_dir_all(workspace);
+}
+
 #[test]
 fn list_manual_memories_sorted_by_priority_then_date() {
     let _guard = MemTestGuard::new();
@@ -475,6 +532,7 @@ fn list_manual_memories_sorted_by_priority_then_date() {
 
     let _ = fs::remove_dir_all(workspace);
 }
+
 #[test]
 fn load_manual_memories_corrupted_json_errors() {
     let dir = temp_path("corrupted-manual");
@@ -488,6 +546,7 @@ fn load_manual_memories_corrupted_json_errors() {
 
     let _ = fs::remove_dir_all(dir);
 }
+
 #[test]
 fn save_manual_memories_creates_parent_dirs() {
     let dir = temp_path("save-manual-mkdir");
@@ -501,6 +560,7 @@ fn save_manual_memories_creates_parent_dirs() {
 
     let _ = fs::remove_dir_all(dir);
 }
+
 #[test]
 fn score_manual_memory_single_char_full_query_match() {
     let _guard = MemTestGuard::new();
@@ -516,6 +576,7 @@ fn score_manual_memory_single_char_full_query_match() {
     assert!(result.is_some());
     assert!(result.unwrap().score.unwrap() >= 100.0);
 }
+
 #[test]
 fn score_manual_memory_completely_unrelated_returns_none() {
     let _guard = MemTestGuard::new();
@@ -530,6 +591,7 @@ fn score_manual_memory_completely_unrelated_returns_none() {
     let result = score_manual_memory(&memory, "xyz", &["xyz".to_string()]);
     assert!(result.is_none());
 }
+
 #[test]
 fn manual_memory_fact_serialization_round_trip() {
     let fact = ManualMemoryFact {

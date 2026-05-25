@@ -1,17 +1,16 @@
 use super::*;
-use agentic_memory::AgentMemoryKind;
-use agentic_memory::Consolidator;
-use agentic_memory::EpisodicTrace;
-use agentic_memory::EvidenceSource as AgentEvidenceSource;
-use agentic_memory::InMemoryAgentStore;
-use agentic_memory::MemoryHeader;
-use agentic_memory::MemoryPacketItem;
-use agentic_memory::Scope;
+use agentic_memory::{
+    AgentMemoryKind, AgentMemoryStore, AgentStateEncoder, AgentTask, Consolidator, EpisodicTrace,
+    EvidenceSource as AgentEvidenceSource, InMemoryAgentStore, MemoryHeader, MemoryPacketConfig,
+    MemoryPacketItem, PromptMemoryPacketBuilder, Scope,
+};
 use anyhow::{Context, Result};
 use std::collections::{BTreeSet, HashSet};
+
 const AGENT_MEMORY_MIN_SIMILARITY: f64 = 0.12;
 const AGENT_MEMORY_PACKET_ITEMS: usize = 4;
 const AGENT_MEMORY_ITEM_CHARS: usize = 220;
+
 pub(super) fn rebuild_agent_memory_store(
     paths: &WorkspaceMemoryPaths,
     sessions: &[&ChatSession],
@@ -37,6 +36,47 @@ pub(super) fn rebuild_agent_memory_store(
         })?;
     Ok(())
 }
+
+pub(super) fn retrieve_agent_memory_hits(
+    paths: &WorkspaceMemoryPaths,
+    query: &str,
+    invalidated_doc_keys: &HashSet<String>,
+) -> Result<Vec<MemoryHit>> {
+    let Some(store) = load_agent_memory_store(paths)? else {
+        return Ok(Vec::new());
+    };
+
+    let mut state = AgentStateEncoder::default().encode(AgentTask {
+        goal: sanitize_memory_text(query),
+        scope: Scope::project(paths.workspace_id.clone()),
+        exact_fingerprint_fields: vec![paths.workspace_id.clone()],
+        ..AgentTask::default()
+    });
+    let ownership = {
+        let stored_ownership = store.ownership_for(&state, AGENT_MEMORY_MIN_SIMILARITY);
+        state.ownership.merge_prefer_confident(stored_ownership);
+        state.ownership.clone()
+    };
+    let packet = PromptMemoryPacketBuilder {
+        config: MemoryPacketConfig {
+            max_items: AGENT_MEMORY_PACKET_ITEMS,
+            max_chars_per_item: AGENT_MEMORY_ITEM_CHARS,
+            min_similarity: AGENT_MEMORY_MIN_SIMILARITY,
+            include_verified: true,
+            include_exact: true,
+            include_episodes: true,
+        },
+    }
+    .build(&store, &state, &ownership);
+
+    Ok(packet
+        .items
+        .into_iter()
+        .filter_map(|item| packet_item_to_hit(&store, item))
+        .filter(|hit| !invalidated_doc_keys.contains(&hit.doc_key))
+        .collect())
+}
+
 fn load_agent_memory_store(paths: &WorkspaceMemoryPaths) -> Result<Option<InMemoryAgentStore>> {
     if !paths.agent_memory_store_path.is_file() {
         return Ok(None);
@@ -51,6 +91,7 @@ fn load_agent_memory_store(paths: &WorkspaceMemoryPaths) -> Result<Option<InMemo
         })?;
     Ok(Some(store))
 }
+
 fn session_episodes(
     paths: &WorkspaceMemoryPaths,
     session: &ChatSession,
@@ -97,6 +138,7 @@ fn session_episodes(
 
     episodes
 }
+
 fn packet_item_to_hit(store: &InMemoryAgentStore, item: MemoryPacketItem) -> Option<MemoryHit> {
     let header = find_memory_header(store, &item.id)?;
     let meta = lookup_source_meta(store, header);
@@ -131,6 +173,7 @@ fn packet_item_to_hit(store: &InMemoryAgentStore, item: MemoryPacketItem) -> Opt
         score: Some(item.confidence as f32),
     })
 }
+
 fn find_memory_header<'a>(
     store: &'a InMemoryAgentStore,
     item_id: &str,
@@ -160,6 +203,7 @@ fn find_memory_header<'a>(
         .find(|item| item.header.id == item_id)
         .map(|item| &item.header)
 }
+
 fn lookup_source_meta(store: &InMemoryAgentStore, header: &MemoryHeader) -> Option<SourceMeta> {
     parse_source_meta(&header.tags).or_else(|| {
         header
@@ -175,6 +219,7 @@ fn lookup_source_meta(store: &InMemoryAgentStore, header: &MemoryHeader) -> Opti
             })
     })
 }
+
 fn parse_source_meta(tags: &[String]) -> Option<SourceMeta> {
     let mut meta = SourceMeta::default();
     for tag in tags {
@@ -195,6 +240,7 @@ fn parse_source_meta(tags: &[String]) -> Option<SourceMeta> {
     meta.doc_key.as_ref()?;
     Some(meta)
 }
+
 fn preceding_user_goal(session: &ChatSession, message_index: usize) -> Option<(String, usize)> {
     session.messages[..message_index]
         .iter()
@@ -209,6 +255,7 @@ fn preceding_user_goal(session: &ChatSession, message_index: usize) -> Option<(S
         })
         .filter(|(goal, _)| !goal.is_empty())
 }
+
 fn extract_action_labels(content: &str) -> Vec<String> {
     let mut seen = BTreeSet::new();
     let mut labels = Vec::new();
@@ -233,6 +280,7 @@ fn extract_action_labels(content: &str) -> Vec<String> {
 
     labels
 }
+
 fn extract_observations(body: &str) -> Vec<String> {
     body.lines()
         .map(sanitize_memory_text)
@@ -240,6 +288,7 @@ fn extract_observations(body: &str) -> Vec<String> {
         .take(3)
         .collect()
 }
+
 fn extract_successful_patterns(body: &str) -> Vec<String> {
     let mut seen = BTreeSet::new();
     let mut patterns = Vec::new();
@@ -257,6 +306,7 @@ fn extract_successful_patterns(body: &str) -> Vec<String> {
 
     patterns
 }
+
 fn episode_outcome_text(body: &str, final_state: Option<&str>) -> String {
     let summary = truncate_text(&sanitize_memory_text(body), 140);
     match final_state.map(str::trim).filter(|state| !state.is_empty()) {
@@ -285,9 +335,11 @@ fn episode_outcome_text(body: &str, final_state: Option<&str>) -> String {
         }
     }
 }
+
 fn is_last_message(session: &ChatSession, message_index: usize) -> bool {
     message_index + 1 == session.messages.len()
 }
+
 fn truncate_text(value: &str, max_chars: usize) -> String {
     if value.chars().count() <= max_chars {
         return value.to_string();
@@ -300,6 +352,7 @@ fn truncate_text(value: &str, max_chars: usize) -> String {
     out.push_str("...");
     out
 }
+
 fn kind_label(kind: AgentMemoryKind) -> &'static str {
     match kind {
         AgentMemoryKind::SemanticFact => "fact",
@@ -316,6 +369,7 @@ fn kind_label(kind: AgentMemoryKind) -> &'static str {
         AgentMemoryKind::SafetyRule => "safety",
     }
 }
+
 #[derive(Default)]
 struct SourceMeta {
     doc_key: Option<String>,

@@ -14,9 +14,11 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
 use crate::config;
 use crate::data::{session_log_snapshot, ChatMessage, ChatSession};
 use crate::model::ModelProvider;
+
 mod agentic;
 mod backend;
 mod manual;
@@ -24,8 +26,11 @@ mod paths;
 mod retrieval_filters;
 #[cfg(test)]
 mod tests;
-use self::retrieval_filters::sanitize_memory_text;
-use self::retrieval_filters::sanitize_retrieved_memory_text;
+
+use self::retrieval_filters::{
+    sanitize_memory_text, sanitize_retrieved_memory_text, should_skip_memory_query,
+};
+
 pub use self::backend::MemMachineStatus;
 pub use self::manual::{
     build_query_with_memory, forget_manual_memory, format_retrieved_memory_preview,
@@ -36,8 +41,10 @@ pub use self::paths::{
     ensure_workspace_layout, memory_enabled, memory_root_dir, workspace_id_for_path,
     workspace_memory_paths,
 };
+
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0001_0000_01b3;
+
 pub const MEMORY_DIR_NAME: &str = "memory";
 pub const INGEST_STATE_FILE_NAME: &str = "ingest-state.json";
 pub const MANUAL_MEMORIES_FILE_NAME: &str = "manual-memories.json";
@@ -46,6 +53,7 @@ pub const WRITER_LOCK_FILE_NAME: &str = "writer.lock";
 pub const DEFAULT_RETRIEVAL_LIMIT: usize = 6;
 const WRITER_LOCK_RETRY_ATTEMPTS: usize = 6;
 const WRITER_LOCK_RETRY_BASE_MS: u64 = 50;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceMemoryPaths {
     pub workspace_id: String,
@@ -56,12 +64,14 @@ pub struct WorkspaceMemoryPaths {
     pub agent_memory_store_path: PathBuf,
     pub writer_lock_path: PathBuf,
 }
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MemoryContext {
     pub workspace_id: String,
     pub query: String,
     pub hits: Vec<MemoryHit>,
 }
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MemoryHit {
     pub doc_key: String,
@@ -79,6 +89,7 @@ pub struct MemoryHit {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub score: Option<f32>,
 }
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ManualMemoryPriority {
@@ -86,20 +97,23 @@ pub enum ManualMemoryPriority {
     #[default]
     High,
 }
+
 impl ManualMemoryPriority {
     fn boost(self) -> f32 {
         match self {
             Self::High => 1_000.0,
             Self::Normal => 0.0,
         }
-    }}
-impl ManualMemoryPriority {
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::High => "high",
             Self::Normal => "normal",
         }
-    }}
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ManualMemoryFact {
     pub id: String,
@@ -109,24 +123,28 @@ pub struct ManualMemoryFact {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ManualMemoriesState {
     pub version: u32,
     #[serde(default)]
     pub memories: BTreeMap<String, ManualMemoryFact>,
 }
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionIngestState {
     pub indexed_message_count: usize,
     pub history_fingerprint: String,
     pub updated_at: DateTime<Utc>,
 }
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MemoryInvalidation {
     pub invalidated_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IngestState {
     pub version: u32,
@@ -135,12 +153,14 @@ pub struct IngestState {
     #[serde(default)]
     pub invalidated_doc_keys: BTreeMap<String, MemoryInvalidation>,
 }
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MemoryIndexSummary {
     pub indexed_sessions: usize,
     pub indexed_messages: usize,
     pub rebuilt: bool,
 }
+
 impl Default for IngestState {
     fn default() -> Self {
         Self {
@@ -150,6 +170,7 @@ impl Default for IngestState {
         }
     }
 }
+
 impl Default for ManualMemoriesState {
     fn default() -> Self {
         Self {
@@ -158,6 +179,7 @@ impl Default for ManualMemoriesState {
         }
     }
 }
+
 pub fn index_workspace_sessions(
     workspace_path: impl AsRef<Path>,
     sessions: &[ChatSession],
@@ -197,10 +219,58 @@ pub fn index_workspace_sessions(
 
     Ok(summary)
 }
+
+pub fn retrieve_memory_context(
+    workspace_path: impl AsRef<Path>,
+    query: &str,
+) -> Result<Option<MemoryContext>> {
+    if !memory_enabled() || query.trim().is_empty() || should_skip_memory_query(query) {
+        return Ok(None);
+    }
+
+    let paths = workspace_memory_paths(workspace_path)?;
+
+    // Load invalidated doc keys (may be empty if no ingest state exists)
+    let invalidated_doc_keys: HashSet<String> = load_ingest_state(&paths.ingest_state_path)?
+        .invalidated_doc_keys
+        .into_keys()
+        .collect();
+
+    let mut hits = manual_memory_hits(&paths.manual_memories_path, query)?
+        .into_iter()
+        .filter(|hit| !invalidated_doc_keys.contains(&hit.doc_key))
+        .collect::<Vec<_>>();
+    match agentic::retrieve_agent_memory_hits(&paths, query, &invalidated_doc_keys) {
+        Ok(agent_hits) => hits.extend(agent_hits),
+        Err(err) => warn!(
+            error = %err,
+            workspace = %paths.workspace_root.display(),
+            "agent-memory retrieval failed; continuing without local packet hits"
+        ),
+    }
+    match backend::search_memmachine(&paths, query, &invalidated_doc_keys) {
+        Ok(remote_hits) => hits.extend(remote_hits),
+        Err(err) => backend::log_retrieval_failure(&paths, &err),
+    }
+    dedupe_memory_hits(&mut hits);
+    hits.truncate(DEFAULT_RETRIEVAL_LIMIT);
+
+    if hits.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(MemoryContext {
+        workspace_id: paths.workspace_id,
+        query: query.to_string(),
+        hits,
+    }))
+}
+
 pub fn workspace_memmachine_status(workspace_path: impl AsRef<Path>) -> Result<MemMachineStatus> {
     let paths = workspace_memory_paths(workspace_path)?;
     backend::memmachine_status(&paths)
 }
+
 fn canonical_workspace_path(workspace_path: impl AsRef<Path>) -> Result<PathBuf> {
     workspace_path.as_ref().canonicalize().with_context(|| {
         format!(
@@ -209,9 +279,11 @@ fn canonical_workspace_path(workspace_path: impl AsRef<Path>) -> Result<PathBuf>
         )
     })
 }
+
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     crate::storage::atomic::atomic_write(path, bytes).map(|_| ())
 }
+
 fn fnv_hash_bytes(mut hash: u64, bytes: &[u8]) -> u64 {
     for byte in bytes {
         hash ^= u64::from(*byte);
@@ -219,6 +291,7 @@ fn fnv_hash_bytes(mut hash: u64, bytes: &[u8]) -> u64 {
     }
     hash
 }
+
 fn parse_timestamp(value: &str) -> Option<DateTime<Utc>> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -234,11 +307,13 @@ fn parse_timestamp(value: &str) -> Option<DateTime<Utc>> {
         .ok()
         .and_then(|seconds| Utc.timestamp_opt(seconds, 0).single())
 }
+
 fn default_memory_timestamp() -> DateTime<Utc> {
     Utc.timestamp_opt(0, 0)
         .single()
         .expect("unix epoch timestamp should be valid")
 }
+
 fn manual_memory_hits(manual_memories_path: &Path, query: &str) -> Result<Vec<MemoryHit>> {
     let normalized_query = sanitize_memory_text(query).to_lowercase();
     if normalized_query.is_empty() {
@@ -266,10 +341,12 @@ fn manual_memory_hits(manual_memories_path: &Path, query: &str) -> Result<Vec<Me
     });
     Ok(hits)
 }
+
 fn dedupe_memory_hits(hits: &mut Vec<MemoryHit>) {
     let mut seen = HashSet::new();
     hits.retain(|hit| seen.insert(hit.doc_key.clone()));
 }
+
 fn score_manual_memory(
     memory: &ManualMemoryFact,
     normalized_query: &str,
@@ -304,6 +381,7 @@ fn score_manual_memory(
         score: Some(score),
     })
 }
+
 fn normalize_invalidation_reason(reason: Option<String>) -> Option<String> {
     reason.and_then(|reason| {
         let sanitized = sanitize_memory_text(&reason);
@@ -314,6 +392,7 @@ fn normalize_invalidation_reason(reason: Option<String>) -> Option<String> {
         }
     })
 }
+
 fn acquire_writer_lock(paths: &WorkspaceMemoryPaths) -> Result<WriterLock> {
     let file = std::fs::OpenOptions::new()
         .create(true)
@@ -344,6 +423,7 @@ fn acquire_writer_lock(paths: &WorkspaceMemoryPaths) -> Result<WriterLock> {
 
     unreachable!("writer lock loop should return before exhaustion");
 }
+
 fn should_rebuild_workspace(sessions: &[&ChatSession], state: &IngestState) -> bool {
     let current_ids: HashSet<&str> = sessions.iter().map(|session| session.id.as_str()).collect();
     for chat_id in state.sessions.keys() {
@@ -377,6 +457,7 @@ fn should_rebuild_workspace(sessions: &[&ChatSession], state: &IngestState) -> b
 
     false
 }
+
 fn indexed_message_content(message: &ChatMessage) -> String {
     if message.is_user {
         return message.content.clone();
@@ -384,6 +465,7 @@ fn indexed_message_content(message: &ChatMessage) -> String {
 
     assistant_memory_body(&message.content).unwrap_or_else(|| message.content.clone())
 }
+
 fn assistant_memory_body(content: &str) -> Option<String> {
     let lines: Vec<&str> = content.split('\n').collect();
     let transcript_line_count = lines
@@ -404,6 +486,7 @@ fn assistant_memory_body(content: &str) -> Option<String> {
         .to_string();
     (!body.trim().is_empty()).then_some(body)
 }
+
 fn is_standard_transcript_line_for_memory(line: &str) -> bool {
     let stripped = strip_standard_transcript_timestamp_prefix(line);
     if stripped.len() != line.len() {
@@ -417,6 +500,7 @@ fn is_standard_transcript_line_for_memory(line: &str) -> bool {
     }
     false
 }
+
 fn strip_standard_transcript_timestamp_prefix(line: &str) -> &str {
     let bytes = line.as_bytes();
     if bytes.len() < 16 || bytes[0] != b'[' {
@@ -453,6 +537,7 @@ fn strip_standard_transcript_timestamp_prefix(line: &str) -> &str {
     }
     &line[index + 10..]
 }
+
 fn looks_like_standard_model_label(label: &str) -> bool {
     if label.is_empty()
         || label.len() > 24
@@ -472,6 +557,7 @@ fn looks_like_standard_model_label(label: &str) -> bool {
         .iter()
         .any(|token| lower.contains(token))
 }
+
 fn message_turn_index(session: &ChatSession, message_index: usize) -> usize {
     session.messages[..=message_index]
         .iter()
@@ -479,6 +565,7 @@ fn message_turn_index(session: &ChatSession, message_index: usize) -> usize {
         .count()
         .saturating_sub(1)
 }
+
 fn session_provider(session: &ChatSession) -> &'static str {
     ModelProvider::ALL
         .into_iter()
@@ -486,6 +573,7 @@ fn session_provider(session: &ChatSession) -> &'static str {
         .map(|provider| provider.as_str())
         .unwrap_or("unknown")
 }
+
 fn build_session_ingest_state(session: &ChatSession) -> SessionIngestState {
     SessionIngestState {
         indexed_message_count: session.messages.len(),
@@ -493,9 +581,11 @@ fn build_session_ingest_state(session: &ChatSession) -> SessionIngestState {
         updated_at: Utc::now(),
     }
 }
+
 fn session_history_fingerprint(session: &ChatSession) -> String {
     format!("{:016x}", session_log_snapshot(session).history_fingerprint)
 }
+
 fn session_prefix_fingerprint(session: &ChatSession, message_count: usize) -> String {
     let mut prefix = session.clone();
     prefix.messages.truncate(message_count);
@@ -506,7 +596,9 @@ fn session_prefix_fingerprint(session: &ChatSession, message_count: usize) -> St
         .unwrap_or(prefix.created_at);
     session_history_fingerprint(&prefix)
 }
+
 struct WriterLock(std::fs::File);
+
 impl Drop for WriterLock {
     fn drop(&mut self) {
         let _ = self.0.unlock();
